@@ -125,7 +125,9 @@ func setupInterceptors(server internal.Server, c RpcServerConf, metrics *stat.Me
 			time.Duration(c.Timeout) * time.Millisecond))
 	}
 
+	logx.Infof("rpc setupinterceptors c.Auth=%v", c.Auth)
 	if c.Auth {
+		logx.Infof("rpc setupinterceptors c.Redis.Key=%v", c.Redis.Key)
 		authenticator, err := auth.NewAuthenticator(c.Redis.NewRedis(), c.Redis.Key, c.StrictControl)
 		if err != nil {
 			return err

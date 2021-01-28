@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/shuguocloud/go-zero/core/collection"
+	"github.com/shuguocloud/go-zero/core/logx"
 	"github.com/shuguocloud/go-zero/core/stores/redis"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -35,6 +36,7 @@ func NewAuthenticator(store *redis.Redis, key string, strict bool) (*Authenticat
 }
 
 func (a *Authenticator) Authenticate(ctx context.Context) error {
+	logx.Infof("rpc auth authenticate ctx=%#v", ctx)
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return status.Error(codes.Unauthenticated, missingMetadata)
@@ -54,9 +56,12 @@ func (a *Authenticator) Authenticate(ctx context.Context) error {
 }
 
 func (a *Authenticator) validate(app, token string) error {
+	logx.Infof("rpc auth validate app=%s&token=%s", app, token)
 	expect, err := a.cache.Take(app, func() (interface{}, error) {
 		return a.store.Hget(a.key, app)
 	})
+	logx.Infof("rpc auth validate expect=%#v", expect)
+	logx.Infof("rpc auth validate err=%#v", err)
 	if err != nil {
 		if a.strict {
 			return status.Error(codes.Internal, err.Error())
