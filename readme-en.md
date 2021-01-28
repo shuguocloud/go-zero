@@ -209,3 +209,6 @@ go get -u github.com/shuguocloud/go-zero
 * [Rapid development of microservice systems](https://github.com/shuguocloud/zero-doc/blob/main/doc/shorturl-en.md)
 * [Rapid development of microservice systems - multiple RPCs](https://github.com/shuguocloud/zero-doc/blob/main/doc/bookstore-en.md)
 
+## 9. Chat group
+
+Join the chat via https://discord.gg/4JQvC5A4Fe
