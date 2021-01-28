@@ -185,4 +185,4 @@ GO111MODULE=on GOPROXY=https://goproxy.cn/,direct go get -u github.com/shuguoclo
 
 ## 8. 基于官方版本优化
 
-base repos [https://github.com/tal-tech/go-zero](https://github.com/tal-tech/go-zero) for micro services
+base repos [https://github.com/shuguocloud/go-zero](https://github.com/shuguocloud/go-zero) for micro services
