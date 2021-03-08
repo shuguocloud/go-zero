@@ -1,5 +1,6 @@
 package template
 
+// Error defines an error template
 var Error = `package {{.pkg}}
 
 import "github.com/shuguocloud/go-zero/core/stores/sqlx"

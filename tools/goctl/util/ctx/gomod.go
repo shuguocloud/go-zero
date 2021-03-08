@@ -9,6 +9,8 @@ import (
 	"github.com/shuguocloud/go-zero/tools/goctl/rpc/execx"
 )
 
+// Module contains the relative data of go module,
+// which is the result of the command go list
 type Module struct {
 	Path      string
 	Main      bool
