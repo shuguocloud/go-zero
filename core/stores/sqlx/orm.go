@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/shuguocloud/go-zero/core/logx"
 	"github.com/shuguocloud/go-zero/core/mapping"
 )
 
@@ -64,6 +65,7 @@ func getTaggedFieldValueMap(v reflect.Value) (map[string]interface{}, error) {
 func mapStructFieldsIntoSlice(v reflect.Value, columns []string, strict bool) ([]interface{}, error) {
 	fields := unwrapFields(v)
 	if strict && len(columns) < len(fields) {
+		logx.Errorf("sql err columns[%d]'length neq fields[%d]'length", len(columns), len(fields))
 		return nil, ErrNotMatchDestination
 	}
 
