@@ -16,7 +16,7 @@ type (
 		Redis         redis.RedisKeyConf `json:",optional"`
 		StrictControl bool               `json:",optional"`
 		// setting 0 means no timeout
-		Timeout      int64 `json:",default=2000"`
+		Timeout      int64 `json:",default=5000"`
 		CpuThreshold int64 `json:",default=900,range=[0:1000]"`
 	}
 
@@ -26,7 +26,7 @@ type (
 		Endpoints []string        `json:",optional=!Etcd"`
 		App       string          `json:",optional"`
 		Token     string          `json:",optional"`
-		Timeout   int64           `json:",default=2000"`
+		Timeout   int64           `json:",default=5000"`
 	}
 )
 
