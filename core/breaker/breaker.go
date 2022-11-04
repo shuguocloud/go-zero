@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	numHistoryReasons = 5
+	numHistoryReasons = 10
 	timeFormat        = "15:04:05"
 )
 
