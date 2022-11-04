@@ -13,7 +13,7 @@ const (
 	window     = time.Second * 10
 	buckets    = 40
 	k          = 1.5
-	protection = 5
+	protection = 10
 )
 
 // googleBreaker is a netflixBreaker pattern from google.
