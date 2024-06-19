@@ -3,3 +3,5 @@
 未能模块导入go mod
 3. release v1.1.7 to v1.1.8
 修改熔断值numHistoryReasons由5到10，解决系统提示"circuit breaker is open"
+4. release v1.1.8 to v1.1.9
+添加dm8适配
