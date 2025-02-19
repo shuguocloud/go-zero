@@ -1,15 +1,17 @@
 package handler
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"io"
-	"io/ioutil"
+	"net"
 	"net/http"
 
 	"github.com/shuguocloud/go-zero/core/codec"
-	"github.com/shuguocloud/go-zero/core/logx"
+	"github.com/shuguocloud/go-zero/core/logc"
 )
 
 const maxBytes = 1 << 20 // 1 MiB
@@ -18,17 +20,22 @@ var errContentLengthExceeded = errors.New("content length exceeded")
 
 // CryptionHandler returns a middleware to handle cryption.
 func CryptionHandler(key []byte) func(http.Handler) http.Handler {
+	return LimitCryptionHandler(maxBytes, key)
+}
+
+// LimitCryptionHandler returns a middleware to handle cryption.
+func LimitCryptionHandler(limitBytes int64, key []byte) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			cw := newCryptionResponseWriter(w)
-			defer cw.flush(key)
+			defer cw.flush(r.Context(), key)
 
 			if r.ContentLength <= 0 {
 				next.ServeHTTP(cw, r)
 				return
 			}
 
-			if err := decryptBody(key, r); err != nil {
+			if err := decryptBody(limitBytes, key, r); err != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -38,8 +45,8 @@ func CryptionHandler(key []byte) func(http.Handler) http.Handler {
 	}
 }
 
-func decryptBody(key []byte, r *http.Request) error {
-	if r.ContentLength > maxBytes {
+func decryptBody(limitBytes int64, key []byte, r *http.Request) error {
+	if limitBytes > 0 && r.ContentLength > limitBytes {
 		return errContentLengthExceeded
 	}
 
@@ -49,7 +56,7 @@ func decryptBody(key []byte, r *http.Request) error {
 		content = make([]byte, r.ContentLength)
 		_, err = io.ReadFull(r.Body, content)
 	} else {
-		content, err = ioutil.ReadAll(io.LimitReader(r.Body, maxBytes))
+		content, err = io.ReadAll(io.LimitReader(r.Body, maxBytes))
 	}
 	if err != nil {
 		return err
@@ -67,7 +74,7 @@ func decryptBody(key []byte, r *http.Request) error {
 
 	var buf bytes.Buffer
 	buf.Write(output)
-	r.Body = ioutil.NopCloser(&buf)
+	r.Body = io.NopCloser(&buf)
 
 	return nil
 }
@@ -94,6 +101,16 @@ func (w *cryptionResponseWriter) Header() http.Header {
 	return w.ResponseWriter.Header()
 }
 
+// Hijack implements the http.Hijacker interface.
+// This expands the Response to fulfill http.Hijacker if the underlying http.ResponseWriter supports it.
+func (w *cryptionResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacked, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hijacked.Hijack()
+	}
+
+	return nil, nil, errors.New("server doesn't support hijacking")
+}
+
 func (w *cryptionResponseWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
@@ -102,7 +119,7 @@ func (w *cryptionResponseWriter) WriteHeader(statusCode int) {
 	w.ResponseWriter.WriteHeader(statusCode)
 }
 
-func (w *cryptionResponseWriter) flush(key []byte) {
+func (w *cryptionResponseWriter) flush(ctx context.Context, key []byte) {
 	if w.buf.Len() == 0 {
 		return
 	}
@@ -115,8 +132,8 @@ func (w *cryptionResponseWriter) flush(key []byte) {
 
 	body := base64.StdEncoding.EncodeToString(content)
 	if n, err := io.WriteString(w.ResponseWriter, body); err != nil {
-		logx.Errorf("write response failed, error: %s", err)
-	} else if n < len(content) {
-		logx.Errorf("actual bytes: %d, written bytes: %d", len(content), n)
+		logc.Errorf(ctx, "write response failed, error: %s", err)
+	} else if n < len(body) {
+		logc.Errorf(ctx, "actual bytes: %d, written bytes: %d", len(body), n)
 	}
 }

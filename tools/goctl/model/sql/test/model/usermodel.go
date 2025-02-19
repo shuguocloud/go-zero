@@ -6,17 +6,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shuguocloud/go-zero/core/stores/builder"
 	"github.com/shuguocloud/go-zero/core/stores/sqlc"
 	"github.com/shuguocloud/go-zero/core/stores/sqlx"
 	"github.com/shuguocloud/go-zero/core/stringx"
-	"github.com/shuguocloud/go-zero/tools/goctl/model/sql/builderx"
 )
 
 var (
-	userFieldNames          = builderx.RawFieldNames(&User{})
-	userRows                = strings.Join(userFieldNames, ",")
-	userRowsExpectAutoSet   = strings.Join(stringx.Remove(userFieldNames, "`id`", "`create_time`", "`update_time`"), ",")
-	userRowsWithPlaceHolder = strings.Join(stringx.Remove(userFieldNames, "`id`", "`create_time`", "`update_time`"), "=?,") + "=?"
+	userFieldNames        = builder.RawFieldNames(&User{})
+	userRows              = strings.Join(userFieldNames, ",")
+	userRowsExpectAutoSet = strings.Join(stringx.Remove(userFieldNames,
+		"`id`", "`create_time`", "`update_time`"), ",")
+	userRowsWithPlaceHolder = strings.Join(stringx.Remove(userFieldNames,
+		"`id`", "`create_time`", "`update_time`"), "=?,") + "=?"
 )
 
 type (
@@ -39,12 +41,12 @@ type (
 	// User defines an data structure for mysql
 	User struct {
 		ID         int64     `db:"id"`
-		User       string    `db:"user"`     // 用户
-		Name       string    `db:"name"`     // 用户名称
-		Password   string    `db:"password"` // 用户密码
-		Mobile     string    `db:"mobile"`   // 手机号
-		Gender     string    `db:"gender"`   // 男｜女｜未公开
-		Nickname   string    `db:"nickname"` // 用户昵称
+		User       string    `db:"user"`     // user
+		Name       string    `db:"name"`     // user name
+		Password   string    `db:"password"` // user password
+		Mobile     string    `db:"mobile"`   // user mobile
+		Gender     string    `db:"gender"`   // male | female | unknown
+		Nickname   string    `db:"nickname"` // user nickname
 		CreateTime time.Time `db:"create_time"`
 		UpdateTime time.Time `db:"update_time"`
 	}

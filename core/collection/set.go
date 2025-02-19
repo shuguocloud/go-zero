@@ -17,28 +17,28 @@ const (
 
 // Set is not thread-safe, for concurrent use, make sure to use it with synchronization.
 type Set struct {
-	data map[interface{}]lang.PlaceholderType
+	data map[any]lang.PlaceholderType
 	tp   int
 }
 
 // NewSet returns a managed Set, can only put the values with the same type.
 func NewSet() *Set {
 	return &Set{
-		data: make(map[interface{}]lang.PlaceholderType),
+		data: make(map[any]lang.PlaceholderType),
 		tp:   untyped,
 	}
 }
 
-// NewUnmanagedSet returns a unmanaged Set, which can put values with different types.
+// NewUnmanagedSet returns an unmanaged Set, which can put values with different types.
 func NewUnmanagedSet() *Set {
 	return &Set{
-		data: make(map[interface{}]lang.PlaceholderType),
+		data: make(map[any]lang.PlaceholderType),
 		tp:   unmanaged,
 	}
 }
 
 // Add adds i into s.
-func (s *Set) Add(i ...interface{}) {
+func (s *Set) Add(i ...any) {
 	for _, each := range i {
 		s.add(each)
 	}
@@ -80,7 +80,7 @@ func (s *Set) AddStr(ss ...string) {
 }
 
 // Contains checks if i is in s.
-func (s *Set) Contains(i interface{}) bool {
+func (s *Set) Contains(i any) bool {
 	if len(s.data) == 0 {
 		return false
 	}
@@ -91,8 +91,8 @@ func (s *Set) Contains(i interface{}) bool {
 }
 
 // Keys returns the keys in s.
-func (s *Set) Keys() []interface{} {
-	var keys []interface{}
+func (s *Set) Keys() []any {
+	var keys []any
 
 	for key := range s.data {
 		keys = append(keys, key)
@@ -106,9 +106,7 @@ func (s *Set) KeysInt() []int {
 	var keys []int
 
 	for key := range s.data {
-		if intKey, ok := key.(int); !ok {
-			continue
-		} else {
+		if intKey, ok := key.(int); ok {
 			keys = append(keys, intKey)
 		}
 	}
@@ -121,9 +119,7 @@ func (s *Set) KeysInt64() []int64 {
 	var keys []int64
 
 	for key := range s.data {
-		if intKey, ok := key.(int64); !ok {
-			continue
-		} else {
+		if intKey, ok := key.(int64); ok {
 			keys = append(keys, intKey)
 		}
 	}
@@ -136,9 +132,7 @@ func (s *Set) KeysUint() []uint {
 	var keys []uint
 
 	for key := range s.data {
-		if intKey, ok := key.(uint); !ok {
-			continue
-		} else {
+		if intKey, ok := key.(uint); ok {
 			keys = append(keys, intKey)
 		}
 	}
@@ -151,9 +145,7 @@ func (s *Set) KeysUint64() []uint64 {
 	var keys []uint64
 
 	for key := range s.data {
-		if intKey, ok := key.(uint64); !ok {
-			continue
-		} else {
+		if intKey, ok := key.(uint64); ok {
 			keys = append(keys, intKey)
 		}
 	}
@@ -166,9 +158,7 @@ func (s *Set) KeysStr() []string {
 	var keys []string
 
 	for key := range s.data {
-		if strKey, ok := key.(string); !ok {
-			continue
-		} else {
+		if strKey, ok := key.(string); ok {
 			keys = append(keys, strKey)
 		}
 	}
@@ -177,7 +167,7 @@ func (s *Set) KeysStr() []string {
 }
 
 // Remove removes i from s.
-func (s *Set) Remove(i interface{}) {
+func (s *Set) Remove(i any) {
 	s.validate(i)
 	delete(s.data, i)
 }
@@ -187,7 +177,7 @@ func (s *Set) Count() int {
 	return len(s.data)
 }
 
-func (s *Set) add(i interface{}) {
+func (s *Set) add(i any) {
 	switch s.tp {
 	case unmanaged:
 		// do nothing
@@ -199,7 +189,7 @@ func (s *Set) add(i interface{}) {
 	s.data[i] = lang.Placeholder
 }
 
-func (s *Set) setType(i interface{}) {
+func (s *Set) setType(i any) {
 	// s.tp can only be untyped here
 	switch i.(type) {
 	case int:
@@ -215,7 +205,7 @@ func (s *Set) setType(i interface{}) {
 	}
 }
 
-func (s *Set) validate(i interface{}) {
+func (s *Set) validate(i any) {
 	if s.tp == unmanaged {
 		return
 	}
@@ -223,23 +213,23 @@ func (s *Set) validate(i interface{}) {
 	switch i.(type) {
 	case int:
 		if s.tp != intType {
-			logx.Errorf("Error: element is int, but set contains elements with type %d", s.tp)
+			logx.Errorf("element is int, but set contains elements with type %d", s.tp)
 		}
 	case int64:
 		if s.tp != int64Type {
-			logx.Errorf("Error: element is int64, but set contains elements with type %d", s.tp)
+			logx.Errorf("element is int64, but set contains elements with type %d", s.tp)
 		}
 	case uint:
 		if s.tp != uintType {
-			logx.Errorf("Error: element is uint, but set contains elements with type %d", s.tp)
+			logx.Errorf("element is uint, but set contains elements with type %d", s.tp)
 		}
 	case uint64:
 		if s.tp != uint64Type {
-			logx.Errorf("Error: element is uint64, but set contains elements with type %d", s.tp)
+			logx.Errorf("element is uint64, but set contains elements with type %d", s.tp)
 		}
 	case string:
 		if s.tp != stringType {
-			logx.Errorf("Error: element is string, but set contains elements with type %d", s.tp)
+			logx.Errorf("element is string, but set contains elements with type %d", s.tp)
 		}
 	}
 }

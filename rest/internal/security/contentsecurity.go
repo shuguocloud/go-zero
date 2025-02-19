@@ -14,7 +14,7 @@ import (
 
 	"github.com/shuguocloud/go-zero/core/codec"
 	"github.com/shuguocloud/go-zero/core/iox"
-	"github.com/shuguocloud/go-zero/core/logx"
+	"github.com/shuguocloud/go-zero/core/logc"
 	"github.com/shuguocloud/go-zero/rest/httpx"
 )
 
@@ -119,15 +119,12 @@ func VerifySignature(r *http.Request, securityHeader *ContentSecurityHeader, tol
 	}, "\n")
 	actualSignature := codec.HmacBase64(securityHeader.Key, signContent)
 
-	passed := securityHeader.Signature == actualSignature
-	if !passed {
-		logx.Infof("signature different, expect: %s, actual: %s",
-			securityHeader.Signature, actualSignature)
-	}
-
-	if passed {
+	if securityHeader.Signature == actualSignature {
 		return httpx.CodeSignaturePass
 	}
+
+	logc.Infof(r.Context(), "signature different, expect: %s, actual: %s",
+		securityHeader.Signature, actualSignature)
 
 	return httpx.CodeSignatureInvalidToken
 }

@@ -2,6 +2,7 @@ package javagen
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"strings"
 	"text/template"
@@ -12,32 +13,8 @@ import (
 	"github.com/shuguocloud/go-zero/tools/goctl/util"
 )
 
-const packetTemplate = `package com.xhb.logic.http.packet.{{.packet}};
-
-import com.xhb.core.packet.HttpPacket;
-import com.xhb.core.network.HttpRequestClient;
-{{.imports}}
-
-{{.doc}}
-public class {{.packetName}} extends HttpPacket<{{.responseType}}> {
-	{{.paramsDeclaration}}
-
-	public {{.packetName}}({{.params}}{{if .HasRequestBody}}{{.requestType}} request{{end}}) {
-		{{if .HasRequestBody}}super(request);{{else}}super(EmptyRequest.instance);{{end}}
-		{{if .HasRequestBody}}this.request = request;{{end}}{{.paramsSetter}}
-    }
-
-	@Override
-    public HttpRequestClient.Method requestMethod() {
-        return HttpRequestClient.Method.{{.method}};
-    }
-
-	@Override
-    public String requestUri() {
-        return {{.uri}};
-    }
-}
-`
+//go:embed packet.tpl
+var packetTemplate string
 
 func genPacket(dir, packetName string, api *spec.ApiSpec) error {
 	for _, route := range api.Service.Routes() {
@@ -67,7 +44,7 @@ func createWith(dir string, api *spec.ApiSpec, route spec.Route, packetName stri
 	}
 	defer fp.Close()
 
-	var hasRequestBody = false
+	hasRequestBody := false
 	if route.RequestType != nil {
 		if defineStruct, ok := route.RequestType.(spec.DefineStruct); ok {
 			hasRequestBody = len(defineStruct.GetBodyMembers()) > 0 || len(defineStruct.GetFormMembers()) > 0
@@ -88,7 +65,7 @@ func createWith(dir string, api *spec.ApiSpec, route spec.Route, packetName stri
 
 	t := template.Must(template.New("packetTemplate").Parse(packetTemplate))
 	var tmplBytes bytes.Buffer
-	err = t.Execute(&tmplBytes, map[string]interface{}{
+	err = t.Execute(&tmplBytes, map[string]any{
 		"packetName":        packet,
 		"method":            strings.ToUpper(route.Method),
 		"uri":               processUri(route),
@@ -204,10 +181,7 @@ func processUri(route spec.Route) string {
 			}
 		}
 	}
-	result := builder.String()
-	if strings.HasSuffix(result, " + \"") {
-		result = result[:len(result)-4]
-	}
+	result := strings.TrimSuffix(builder.String(), " + \"")
 	if strings.HasPrefix(result, "/") {
 		result = strings.TrimPrefix(result, "/")
 		result = "\"" + result

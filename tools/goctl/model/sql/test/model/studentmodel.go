@@ -6,15 +6,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shuguocloud/go-zero/core/stores/builder"
 	"github.com/shuguocloud/go-zero/core/stores/cache"
 	"github.com/shuguocloud/go-zero/core/stores/sqlc"
 	"github.com/shuguocloud/go-zero/core/stores/sqlx"
 	"github.com/shuguocloud/go-zero/core/stringx"
-	"github.com/shuguocloud/go-zero/tools/goctl/model/sql/builderx"
 )
 
 var (
-	studentFieldNames          = builderx.RawFieldNames(&Student{})
+	studentFieldNames          = builder.RawFieldNames(&Student{})
 	studentRows                = strings.Join(studentFieldNames, ",")
 	studentRowsExpectAutoSet   = strings.Join(stringx.Remove(studentFieldNames, "`id`", "`create_time`", "`update_time`"), ",")
 	studentRowsWithPlaceHolder = strings.Join(stringx.Remove(studentFieldNames, "`id`", "`create_time`", "`update_time`"), "=?,") + "=?"
@@ -28,7 +28,7 @@ type (
 	StudentModel interface {
 		Insert(data Student) (sql.Result, error)
 		FindOne(id int64) (*Student, error)
-		FindOneByClassName(class string, name string) (*Student, error)
+		FindOneByClassName(class, name string) (*Student, error)
 		Update(data Student) error
 		// only for test
 		Delete(id int64, className, studentName string) error
@@ -71,7 +71,7 @@ func (m *defaultStudentModel) Insert(data Student) (sql.Result, error) {
 func (m *defaultStudentModel) FindOne(id int64) (*Student, error) {
 	studentIdKey := fmt.Sprintf("%s%v", cacheStudentIdPrefix, id)
 	var resp Student
-	err := m.QueryRow(&resp, studentIdKey, func(conn sqlx.SqlConn, v interface{}) error {
+	err := m.QueryRow(&resp, studentIdKey, func(conn sqlx.SqlConn, v any) error {
 		query := fmt.Sprintf("select %s from %s where `id` = ? limit 1", studentRows, m.table)
 		return conn.QueryRow(v, query, id)
 	})
@@ -85,10 +85,10 @@ func (m *defaultStudentModel) FindOne(id int64) (*Student, error) {
 	}
 }
 
-func (m *defaultStudentModel) FindOneByClassName(class string, name string) (*Student, error) {
+func (m *defaultStudentModel) FindOneByClassName(class, name string) (*Student, error) {
 	studentClassNameKey := fmt.Sprintf("%s%v%v", cacheStudentClassNamePrefix, class, name)
 	var resp Student
-	err := m.QueryRowIndex(&resp, studentClassNameKey, m.formatPrimary, func(conn sqlx.SqlConn, v interface{}) (i interface{}, e error) {
+	err := m.QueryRowIndex(&resp, studentClassNameKey, m.formatPrimary, func(conn sqlx.SqlConn, v any) (i any, e error) {
 		query := fmt.Sprintf("select %s from %s where `class` = ? and `name` = ? limit 1", studentRows, m.table)
 		if err := conn.QueryRow(&resp, query, class, name); err != nil {
 			return nil, err
@@ -124,11 +124,11 @@ func (m *defaultStudentModel) Delete(id int64, className, studentName string) er
 	return err
 }
 
-func (m *defaultStudentModel) formatPrimary(primary interface{}) string {
+func (m *defaultStudentModel) formatPrimary(primary any) string {
 	return fmt.Sprintf("%s%v", cacheStudentIdPrefix, primary)
 }
 
-func (m *defaultStudentModel) queryPrimary(conn sqlx.SqlConn, v, primary interface{}) error {
+func (m *defaultStudentModel) queryPrimary(conn sqlx.SqlConn, v, primary any) error {
 	query := fmt.Sprintf("select %s from %s where `id` = ? limit 1", studentRows, m.table)
 	return conn.QueryRow(v, query, primary)
 }

@@ -1,11 +1,14 @@
 package sqlx
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"io"
-	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+	"github.com/shuguocloud/go-zero/core/logx"
 	"github.com/shuguocloud/go-zero/core/syncx"
 )
 
@@ -17,43 +20,46 @@ const (
 
 var connManager = syncx.NewResourceManager()
 
-type pingedDB struct {
-	*sql.DB
-	once sync.Once
-}
-
-func getCachedSqlConn(driverName, server string) (*pingedDB, error) {
+func getCachedSqlConn(driverName, server string) (*sql.DB, error) {
 	val, err := connManager.GetResource(server, func() (io.Closer, error) {
 		conn, err := newDBConnection(driverName, server)
 		if err != nil {
 			return nil, err
 		}
 
-		return &pingedDB{
-			DB: conn,
-		}, nil
+		if driverName != mysqlDriverName {
+			if cfg, e := mysql.ParseDSN(server); e != nil {
+				// if cannot parse, don't collect the metrics
+				logx.Error(e)
+			} else {
+				checksum := sha256.Sum256([]byte(server))
+				connCollector.registerClient(&statGetter{
+					host:   cfg.Addr,
+					dbName: cfg.DBName,
+					hash:   hex.EncodeToString(checksum[:]),
+					poolStats: func() sql.DBStats {
+						return conn.Stats()
+					},
+				})
+			}
+		}
+
+		return conn, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return val.(*pingedDB), nil
+	return val.(*sql.DB), nil
 }
 
 func getSqlConn(driverName, server string) (*sql.DB, error) {
-	pdb, err := getCachedSqlConn(driverName, server)
+	conn, err := getCachedSqlConn(driverName, server)
 	if err != nil {
 		return nil, err
 	}
 
-	pdb.once.Do(func() {
-		err = pdb.Ping()
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return pdb.DB, nil
+	return conn, nil
 }
 
 func newDBConnection(driverName, datasource string) (*sql.DB, error) {
@@ -69,6 +75,11 @@ func newDBConnection(driverName, datasource string) (*sql.DB, error) {
 	conn.SetMaxIdleConns(maxIdleConns)
 	conn.SetMaxOpenConns(maxOpenConns)
 	conn.SetConnMaxLifetime(maxLifetime)
+
+	if err := conn.Ping(); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 
 	return conn, nil
 }

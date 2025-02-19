@@ -2,15 +2,20 @@ package upgrade
 
 import (
 	"fmt"
+	"runtime"
 
+	"github.com/spf13/cobra"
 	"github.com/shuguocloud/go-zero/tools/goctl/rpc/execx"
-	"github.com/urfave/cli"
 )
 
-// Upgrade gets the latest goctl by
-// go get -u github.com/shuguocloud/go-zero/tools/goctl
-func Upgrade(_ *cli.Context) error {
-	info, err := execx.Run("GO111MODULE=on GOPROXY=https://goproxy.cn/,direct go get -u github.com/shuguocloud/go-zero/tools/goctl", "")
+// upgrade gets the latest goctl by
+// go install github.com/shuguocloud/go-zero/tools/goctl@latest
+func upgrade(_ *cobra.Command, _ []string) error {
+	cmd := `go install github.com/shuguocloud/go-zero/tools/goctl@latest`
+	if runtime.GOOS == "windows" {
+		cmd = `go install github.com/shuguocloud/go-zero/tools/goctl@latest`
+	}
+	info, err := execx.Run(cmd, "")
 	if err != nil {
 		return err
 	}

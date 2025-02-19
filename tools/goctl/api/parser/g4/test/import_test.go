@@ -9,7 +9,7 @@ import (
 	"github.com/shuguocloud/go-zero/tools/goctl/api/parser/g4/gen/api"
 )
 
-var importAccept = func(p *api.ApiParserParser, visitor *ast.ApiVisitor) interface{} {
+var importAccept = func(p *api.ApiParserParser, visitor *ast.ApiVisitor) any {
 	return p.ImportSpec().Accept(visitor)
 }
 

@@ -10,19 +10,19 @@ import (
 
 	"github.com/shuguocloud/go-zero/core/logx"
 	"github.com/shuguocloud/go-zero/tools/goctl/api/spec"
-	"github.com/shuguocloud/go-zero/tools/goctl/util"
+	"github.com/shuguocloud/go-zero/tools/goctl/util/pathx"
 )
 
 // MaybeCreateFile creates file if not exists
 func MaybeCreateFile(dir, subdir, file string) (fp *os.File, created bool, err error) {
-	logx.Must(util.MkdirIfNotExist(path.Join(dir, subdir)))
+	logx.Must(pathx.MkdirIfNotExist(path.Join(dir, subdir)))
 	fpath := path.Join(dir, subdir, file)
-	if util.FileExists(fpath) {
+	if pathx.FileExists(fpath) {
 		fmt.Printf("%s exists, ignored generation\n", fpath)
 		return nil, false, nil
 	}
 
-	fp, err = util.CreateIfNotExist(fpath)
+	fp, err = pathx.CreateIfNotExist(fpath)
 	created = err == nil
 	return
 }
@@ -76,7 +76,7 @@ func WriteIndent(writer io.Writer, indent int) {
 
 // RemoveComment filters comment content
 func RemoveComment(line string) string {
-	var commentIdx = strings.Index(line, "//")
+	commentIdx := strings.Index(line, "//")
 	if commentIdx >= 0 {
 		return strings.TrimSpace(line[:commentIdx])
 	}

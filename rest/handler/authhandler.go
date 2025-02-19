@@ -6,8 +6,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 
-	"github.com/dgrijalva/jwt-go"
-	"github.com/shuguocloud/go-zero/core/logx"
+	"github.com/golang-jwt/jwt/v4"
+	"github.com/shuguocloud/go-zero/core/logc"
+	"github.com/shuguocloud/go-zero/rest/internal/response"
 	"github.com/shuguocloud/go-zero/rest/token"
 )
 
@@ -28,7 +29,7 @@ var (
 )
 
 type (
-	// A AuthorizeOptions is authorize options.
+	// An AuthorizeOptions is authorize options.
 	AuthorizeOptions struct {
 		PrevSecret string
 		Callback   UnauthorizedCallback
@@ -40,7 +41,7 @@ type (
 	AuthorizeOption func(opts *AuthorizeOptions)
 )
 
-// Authorize returns an authorize middleware.
+// Authorize returns an authorization middleware.
 func Authorize(secret string, opts ...AuthorizeOption) func(http.Handler) http.Handler {
 	var authOpts AuthorizeOptions
 	for _, opt := range opts {
@@ -99,54 +100,23 @@ func WithUnauthorizedCallback(callback UnauthorizedCallback) AuthorizeOption {
 func detailAuthLog(r *http.Request, reason string) {
 	// discard dump error, only for debug purpose
 	details, _ := httputil.DumpRequest(r, true)
-	logx.Errorf("authorize failed: %s\n=> %+v", reason, string(details))
+	logc.Errorf(r.Context(), "authorize failed: %s\n=> %+v", reason, string(details))
 }
 
 func unauthorized(w http.ResponseWriter, r *http.Request, err error, callback UnauthorizedCallback) {
-	writer := newGuardedResponseWriter(w)
+	writer := response.NewHeaderOnceResponseWriter(w)
 
 	if err != nil {
 		detailAuthLog(r, err.Error())
 	} else {
 		detailAuthLog(r, noDetailReason)
 	}
+
+	// let callback go first, to make sure we respond with user-defined HTTP header
 	if callback != nil {
 		callback(writer, r, err)
 	}
 
+	// if user not setting HTTP header, we set header with 401
 	writer.WriteHeader(http.StatusUnauthorized)
-}
-
-type guardedResponseWriter struct {
-	writer      http.ResponseWriter
-	wroteHeader bool
-}
-
-func newGuardedResponseWriter(w http.ResponseWriter) *guardedResponseWriter {
-	return &guardedResponseWriter{
-		writer: w,
-	}
-}
-
-func (grw *guardedResponseWriter) Flush() {
-	if flusher, ok := grw.writer.(http.Flusher); ok {
-		flusher.Flush()
-	}
-}
-
-func (grw *guardedResponseWriter) Header() http.Header {
-	return grw.writer.Header()
-}
-
-func (grw *guardedResponseWriter) Write(body []byte) (int, error) {
-	return grw.writer.Write(body)
-}
-
-func (grw *guardedResponseWriter) WriteHeader(statusCode int) {
-	if grw.wroteHeader {
-		return
-	}
-
-	grw.wroteHeader = true
-	grw.writer.WriteHeader(statusCode)
 }

@@ -9,7 +9,7 @@ import (
 )
 
 func TestBody(t *testing.T) {
-	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) interface{} {
+	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) any {
 		return p.Body().Accept(v)
 	}
 	t.Run("normal", func(t *testing.T) {
@@ -33,7 +33,7 @@ func TestBody(t *testing.T) {
 }
 
 func TestRoute(t *testing.T) {
-	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) interface{} {
+	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) any {
 		return p.Route().Accept(v)
 	}
 	t.Run("normal", func(t *testing.T) {
@@ -120,8 +120,17 @@ func TestRoute(t *testing.T) {
 						PointerExpr: ast.NewTextExpr("*Bar"),
 						Star:        ast.NewTextExpr("*"),
 						Name:        ast.NewTextExpr("Bar"),
-					}},
+					},
+				},
 			},
+		}))
+
+		v, err = parser.Accept(fn, `post /1/2a/3b/4`)
+		assert.Nil(t, err)
+		route = v.(*ast.Route)
+		assert.True(t, route.Equal(&ast.Route{
+			Method: ast.NewTextExpr("post"),
+			Path:   ast.NewTextExpr("/1/2a/3b/4"),
 		}))
 
 		v, err = parser.Accept(fn, `post /foo/foo-bar/:bar`)
@@ -163,8 +172,8 @@ func TestRoute(t *testing.T) {
 		_, err = parser.Accept(fn, `post foo/bar`)
 		assert.Error(t, err)
 
-		_, err = parser.Accept(fn, `post /foo/bar return (Bar)`)
-		assert.Error(t, err)
+		_, err = parser.Accept(fn, `post /foo/bar returns (Bar)`)
+		assert.Nil(t, err)
 
 		_, err = parser.Accept(fn, ` /foo/bar returns (Bar)`)
 		assert.Error(t, err)
@@ -173,7 +182,7 @@ func TestRoute(t *testing.T) {
 		assert.Error(t, err)
 
 		_, err = parser.Accept(fn, ` post /foo/bar returns (int)`)
-		assert.Error(t, err)
+		assert.Nil(t, err)
 
 		_, err = parser.Accept(fn, ` post /foo/bar returns (*int)`)
 		assert.Error(t, err)
@@ -187,7 +196,7 @@ func TestRoute(t *testing.T) {
 }
 
 func TestAtHandler(t *testing.T) {
-	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) interface{} {
+	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) any {
 		return p.AtHandler().Accept(v)
 	}
 	t.Run("normal", func(t *testing.T) {
@@ -224,11 +233,10 @@ func TestAtHandler(t *testing.T) {
 		_, err = parser.Accept(fn, `@handler "foo"`)
 		assert.Error(t, err)
 	})
-
 }
 
 func TestAtDoc(t *testing.T) {
-	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) interface{} {
+	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) any {
 		return p.AtDoc().Accept(v)
 	}
 	t.Run("normal", func(t *testing.T) {
@@ -300,7 +308,7 @@ func TestAtDoc(t *testing.T) {
 }
 
 func TestServiceRoute(t *testing.T) {
-	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) interface{} {
+	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) any {
 		return p.ServiceRoute().Accept(v)
 	}
 	t.Run("normal", func(t *testing.T) {
@@ -362,7 +370,7 @@ func TestServiceRoute(t *testing.T) {
 }
 
 func TestServiceApi(t *testing.T) {
-	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) interface{} {
+	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) any {
 		return p.ServiceApi().Accept(v)
 	}
 	t.Run("normal", func(t *testing.T) {
@@ -444,7 +452,7 @@ func TestServiceApi(t *testing.T) {
 }
 
 func TestAtServer(t *testing.T) {
-	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) interface{} {
+	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) any {
 		return p.AtServer().Accept(v)
 	}
 	t.Run("normal", func(t *testing.T) {
@@ -512,7 +520,7 @@ func TestAtServer(t *testing.T) {
 }
 
 func TestServiceSpec(t *testing.T) {
-	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) interface{} {
+	fn := func(p *api.ApiParserParser, v *ast.ApiVisitor) any {
 		return p.ServiceSpec().Accept(v)
 	}
 	t.Run("normal", func(t *testing.T) {

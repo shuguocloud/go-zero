@@ -1,27 +1,33 @@
 package rest
 
 import (
-	"log"
+	"crypto/tls"
+	"errors"
 	"net/http"
+	"path"
+	"time"
 
 	"github.com/shuguocloud/go-zero/core/logx"
+	"github.com/shuguocloud/go-zero/rest/chain"
 	"github.com/shuguocloud/go-zero/rest/handler"
 	"github.com/shuguocloud/go-zero/rest/httpx"
+	"github.com/shuguocloud/go-zero/rest/internal"
+	"github.com/shuguocloud/go-zero/rest/internal/cors"
+	"github.com/shuguocloud/go-zero/rest/internal/fileserver"
 	"github.com/shuguocloud/go-zero/rest/router"
 )
 
 type (
-	runOptions struct {
-		start func(*engine) error
-	}
-
 	// RunOption defines the method to customize a Server.
 	RunOption func(*Server)
 
+	// StartOption defines the method to customize http server.
+	StartOption = internal.StartOption
+
 	// A Server is a http server.
 	Server struct {
-		ngin *engine
-		opts runOptions
+		ngin   *engine
+		router httpx.Router
 	}
 )
 
@@ -29,12 +35,12 @@ type (
 // Be aware that later RunOption might overwrite previous one that write the same option.
 // The process will exit if error occurs.
 func MustNewServer(c RestConf, opts ...RunOption) *Server {
-	engine, err := NewServer(c, opts...)
+	server, err := NewServer(c, opts...)
 	if err != nil {
-		log.Fatal(err)
+		logx.Must(err)
 	}
 
-	return engine
+	return server
 }
 
 // NewServer returns a server with given config of c and options defined in opts.
@@ -45,14 +51,11 @@ func NewServer(c RestConf, opts ...RunOption) (*Server, error) {
 	}
 
 	server := &Server{
-		ngin: newEngine(c),
-		opts: runOptions{
-			start: func(srv *engine) error {
-				return srv.Start()
-			},
-		},
+		ngin:   newEngine(c),
+		router: router.NewRouter(),
 	}
 
+	opts = append([]RunOption{WithNotFoundHandler(nil)}, opts...)
 	for _, opt := range opts {
 		opt(server)
 	}
@@ -61,40 +64,110 @@ func NewServer(c RestConf, opts ...RunOption) (*Server, error) {
 }
 
 // AddRoutes add given routes into the Server.
-func (e *Server) AddRoutes(rs []Route, opts ...RouteOption) {
+func (s *Server) AddRoutes(rs []Route, opts ...RouteOption) {
 	r := featuredRoutes{
 		routes: rs,
 	}
 	for _, opt := range opts {
 		opt(&r)
 	}
-	e.ngin.AddRoutes(r)
+	s.ngin.addRoutes(r)
 }
 
 // AddRoute adds given route into the Server.
-func (e *Server) AddRoute(r Route, opts ...RouteOption) {
-	e.AddRoutes([]Route{r}, opts...)
+func (s *Server) AddRoute(r Route, opts ...RouteOption) {
+	s.AddRoutes([]Route{r}, opts...)
+}
+
+// PrintRoutes prints the added routes to stdout.
+func (s *Server) PrintRoutes() {
+	s.ngin.print()
+}
+
+// Routes returns the HTTP routers that registered in the server.
+func (s *Server) Routes() []Route {
+	routes := make([]Route, 0, len(s.ngin.routes))
+
+	for _, r := range s.ngin.routes {
+		routes = append(routes, r.routes...)
+	}
+
+	return routes
 }
 
 // Start starts the Server.
-func (e *Server) Start() {
-	handleError(e.opts.start(e.ngin))
+// Graceful shutdown is enabled by default.
+// Use proc.SetTimeToForceQuit to customize the graceful shutdown period.
+func (s *Server) Start() {
+	handleError(s.ngin.start(s.router))
+}
+
+// StartWithOpts starts the Server.
+// Graceful shutdown is enabled by default.
+// Use proc.SetTimeToForceQuit to customize the graceful shutdown period.
+func (s *Server) StartWithOpts(opts ...StartOption) {
+	handleError(s.ngin.start(s.router, opts...))
 }
 
 // Stop stops the Server.
-func (e *Server) Stop() {
+func (s *Server) Stop() {
 	logx.Close()
 }
 
 // Use adds the given middleware in the Server.
-func (e *Server) Use(middleware Middleware) {
-	e.ngin.use(middleware)
+func (s *Server) Use(middleware Middleware) {
+	s.ngin.use(middleware)
 }
 
 // ToMiddleware converts the given handler to a Middleware.
 func ToMiddleware(handler func(next http.Handler) http.Handler) Middleware {
 	return func(handle http.HandlerFunc) http.HandlerFunc {
 		return handler(handle).ServeHTTP
+	}
+}
+
+// WithChain returns a RunOption that uses the given chain to replace the default chain.
+// JWT auth middleware and the middlewares that added by svr.Use() will be appended.
+func WithChain(chn chain.Chain) RunOption {
+	return func(svr *Server) {
+		svr.ngin.chain = chn
+	}
+}
+
+// WithCors returns a func to enable CORS for given origin, or default to all origins (*).
+func WithCors(origin ...string) RunOption {
+	return func(server *Server) {
+		server.router.SetNotAllowedHandler(cors.NotAllowedHandler(nil, origin...))
+		server.router = newCorsRouter(server.router, nil, origin...)
+	}
+}
+
+// WithCorsHeaders returns a RunOption to enable CORS with given headers.
+func WithCorsHeaders(headers ...string) RunOption {
+	const allDomains = "*"
+
+	return func(server *Server) {
+		server.router.SetNotAllowedHandler(cors.NotAllowedHandler(nil, allDomains))
+		server.router = newCorsRouter(server.router, func(header http.Header) {
+			cors.AddAllowHeaders(header, headers...)
+		}, allDomains)
+	}
+}
+
+// WithCustomCors returns a func to enable CORS for given origin, or default to all origins (*),
+// fn lets caller customizing the response.
+func WithCustomCors(middlewareFn func(header http.Header), notAllowedFn func(http.ResponseWriter),
+	origin ...string) RunOption {
+	return func(server *Server) {
+		server.router.SetNotAllowedHandler(cors.NotAllowedHandler(notAllowedFn, origin...))
+		server.router = newCorsRouter(server.router, middlewareFn, origin...)
+	}
+}
+
+// WithFileServer returns a RunOption to serve files from given dir with given path.
+func WithFileServer(path string, fs http.FileSystem) RunOption {
+	return func(server *Server) {
+		server.router = newFileServingRouter(server.router, path, fs)
 	}
 }
 
@@ -108,7 +181,7 @@ func WithJwt(secret string) RouteOption {
 }
 
 // WithJwtTransition returns a func to enable jwt authentication as well as jwt secret transition.
-// Which means old and new jwt secrets work together for a peroid.
+// Which means old and new jwt secrets work together for a period.
 func WithJwtTransition(secret, prevSecret string) RouteOption {
 	return func(r *featuredRoutes) {
 		// why not validate prevSecret, because prevSecret is an already used one,
@@ -117,6 +190,13 @@ func WithJwtTransition(secret, prevSecret string) RouteOption {
 		r.jwt.enabled = true
 		r.jwt.secret = secret
 		r.jwt.prevSecret = prevSecret
+	}
+}
+
+// WithMaxBytes returns a RouteOption to set maxBytes with the given value.
+func WithMaxBytes(maxBytes int64) RouteOption {
+	return func(r *featuredRoutes) {
+		r.maxBytes = maxBytes
 	}
 }
 
@@ -146,16 +226,33 @@ func WithMiddleware(middleware Middleware, rs ...Route) []Route {
 
 // WithNotFoundHandler returns a RunOption with not found handler set to given handler.
 func WithNotFoundHandler(handler http.Handler) RunOption {
-	rt := router.NewRouter()
-	rt.SetNotFoundHandler(handler)
-	return WithRouter(rt)
+	return func(server *Server) {
+		notFoundHandler := server.ngin.notFoundHandler(handler)
+		server.router.SetNotFoundHandler(notFoundHandler)
+	}
 }
 
 // WithNotAllowedHandler returns a RunOption with not allowed handler set to given handler.
 func WithNotAllowedHandler(handler http.Handler) RunOption {
-	rt := router.NewRouter()
-	rt.SetNotAllowedHandler(handler)
-	return WithRouter(rt)
+	return func(server *Server) {
+		server.router.SetNotAllowedHandler(handler)
+	}
+}
+
+// WithPrefix adds group as a prefix to the route paths.
+func WithPrefix(group string) RouteOption {
+	return func(r *featuredRoutes) {
+		routes := make([]Route, 0, len(r.routes))
+		for _, rt := range r.routes {
+			p := path.Join(group, rt.Path)
+			routes = append(routes, Route{
+				Method:  rt.Method,
+				Path:    p,
+				Handler: rt.Handler,
+			})
+		}
+		r.routes = routes
+	}
 }
 
 // WithPriority returns a RunOption with priority.
@@ -168,9 +265,7 @@ func WithPriority() RouteOption {
 // WithRouter returns a RunOption that make server run with given router.
 func WithRouter(router httpx.Router) RunOption {
 	return func(server *Server) {
-		server.opts.start = func(srv *engine) error {
-			return srv.StartWithRouter(router)
-		}
+		server.router = router
 	}
 }
 
@@ -184,23 +279,37 @@ func WithSignature(signature SignatureConf) RouteOption {
 	}
 }
 
+// WithTimeout returns a RouteOption to set timeout with given value.
+func WithTimeout(timeout time.Duration) RouteOption {
+	return func(r *featuredRoutes) {
+		r.timeout = timeout
+	}
+}
+
+// WithTLSConfig returns a RunOption that with given tls config.
+func WithTLSConfig(cfg *tls.Config) RunOption {
+	return func(svr *Server) {
+		svr.ngin.setTlsConfig(cfg)
+	}
+}
+
 // WithUnauthorizedCallback returns a RunOption that with given unauthorized callback set.
 func WithUnauthorizedCallback(callback handler.UnauthorizedCallback) RunOption {
-	return func(engine *Server) {
-		engine.ngin.SetUnauthorizedCallback(callback)
+	return func(svr *Server) {
+		svr.ngin.setUnauthorizedCallback(callback)
 	}
 }
 
 // WithUnsignedCallback returns a RunOption that with given unsigned callback set.
 func WithUnsignedCallback(callback handler.UnsignedCallback) RunOption {
-	return func(engine *Server) {
-		engine.ngin.SetUnsignedCallback(callback)
+	return func(svr *Server) {
+		svr.ngin.setUnsignedCallback(callback)
 	}
 }
 
 func handleError(err error) {
 	// ErrServerClosed means the server is closed manually
-	if err == nil || err == http.ErrServerClosed {
+	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		return
 	}
 
@@ -212,4 +321,36 @@ func validateSecret(secret string) {
 	if len(secret) < 8 {
 		panic("secret's length can't be less than 8")
 	}
+}
+
+type corsRouter struct {
+	httpx.Router
+	middleware Middleware
+}
+
+func newCorsRouter(router httpx.Router, headerFn func(http.Header), origins ...string) httpx.Router {
+	return &corsRouter{
+		Router:     router,
+		middleware: cors.Middleware(headerFn, origins...),
+	}
+}
+
+func (c *corsRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	c.middleware(c.Router.ServeHTTP)(w, r)
+}
+
+type fileServingRouter struct {
+	httpx.Router
+	middleware Middleware
+}
+
+func newFileServingRouter(router httpx.Router, path string, fs http.FileSystem) httpx.Router {
+	return &fileServingRouter{
+		Router:     router,
+		middleware: fileserver.Middleware(path, fs),
+	}
+}
+
+func (f *fileServingRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.middleware(f.Router.ServeHTTP)(w, r)
 }

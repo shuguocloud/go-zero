@@ -1,8 +1,7 @@
 package service
 
 import (
-	"log"
-
+	"github.com/shuguocloud/go-zero/core/logx"
 	"github.com/shuguocloud/go-zero/core/proc"
 	"github.com/shuguocloud/go-zero/core/syncx"
 	"github.com/shuguocloud/go-zero/core/threading"
@@ -26,6 +25,7 @@ type (
 	}
 
 	// A ServiceGroup is a group of services.
+	// Attention: the starting order of the added services is not guaranteed.
 	ServiceGroup struct {
 		services []Service
 		stopOnce func()
@@ -41,7 +41,8 @@ func NewServiceGroup() *ServiceGroup {
 
 // Add adds service into sg.
 func (sg *ServiceGroup) Add(service Service) {
-	sg.services = append(sg.services, service)
+	// push front, stop with reverse order.
+	sg.services = append([]Service{service}, sg.services...)
 }
 
 // Start starts the ServiceGroup.
@@ -49,7 +50,7 @@ func (sg *ServiceGroup) Add(service Service) {
 // Also, quitting this method will close the logx output.
 func (sg *ServiceGroup) Start() {
 	proc.AddShutdownListener(func() {
-		log.Println("Shutting down...")
+		logx.Info("Shutting down services in group")
 		sg.stopOnce()
 	})
 
@@ -66,7 +67,7 @@ func (sg *ServiceGroup) doStart() {
 
 	for i := range sg.services {
 		service := sg.services[i]
-		routineGroup.RunSafe(func() {
+		routineGroup.Run(func() {
 			service.Start()
 		})
 	}
@@ -75,9 +76,14 @@ func (sg *ServiceGroup) doStart() {
 }
 
 func (sg *ServiceGroup) doStop() {
+	group := threading.NewRoutineGroup()
 	for _, service := range sg.services {
-		service.Stop()
+		// new variable to avoid closure problems, can be removed after go 1.22
+		// see https://golang.org/doc/faq#closures_and_goroutines
+		service := service
+		group.Run(service.Stop)
 	}
+	group.Wait()
 }
 
 // WithStart wraps a start func as a Service.
@@ -95,8 +101,7 @@ func WithStarter(start Starter) Service {
 }
 
 type (
-	stopper struct {
-	}
+	stopper struct{}
 
 	startOnlyService struct {
 		start func()

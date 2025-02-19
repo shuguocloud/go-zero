@@ -6,18 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/spf13/cobra"
 	"github.com/shuguocloud/go-zero/tools/goctl/api/parser"
 	"github.com/shuguocloud/go-zero/tools/goctl/api/spec"
 	"github.com/shuguocloud/go-zero/tools/goctl/rpc/execx"
-	"github.com/shuguocloud/go-zero/tools/goctl/util"
-	"github.com/urfave/cli"
+	"github.com/shuguocloud/go-zero/tools/goctl/util/pathx"
 )
 
 const pluginArg = "_plugin"
@@ -30,19 +29,30 @@ type Plugin struct {
 	Dir         string
 }
 
+var (
+	// VarStringPlugin describes a plugin.
+	VarStringPlugin string
+	// VarStringDir describes a directory.
+	VarStringDir string
+	// VarStringAPI describes an API file.
+	VarStringAPI string
+	// VarStringStyle describes a style.
+	VarStringStyle string
+)
+
 // PluginCommand is the entry of goctl api plugin
-func PluginCommand(c *cli.Context) error {
+func PluginCommand(_ *cobra.Command, _ []string) error {
 	ex, err := os.Executable()
 	if err != nil {
 		panic(err)
 	}
 
-	var plugin = c.String("plugin")
+	plugin := VarStringPlugin
 	if len(plugin) == 0 {
 		return errors.New("missing plugin")
 	}
 
-	transferData, err := prepareArgs(c)
+	transferData, err := prepareArgs()
 	if err != nil {
 		return err
 	}
@@ -69,11 +79,11 @@ func PluginCommand(c *cli.Context) error {
 	return nil
 }
 
-func prepareArgs(c *cli.Context) ([]byte, error) {
-	apiPath := c.String("api")
+func prepareArgs() ([]byte, error) {
+	apiPath := VarStringAPI
 
 	var transferData Plugin
-	if len(apiPath) > 0 && util.FileExists(apiPath) {
+	if len(apiPath) > 0 && pathx.FileExists(apiPath) {
 		api, err := parser.Parse(apiPath)
 		if err != nil {
 			return nil, err
@@ -88,13 +98,13 @@ func prepareArgs(c *cli.Context) ([]byte, error) {
 	}
 
 	transferData.ApiFilePath = absApiFilePath
-	dirAbs, err := filepath.Abs(c.String("dir"))
+	dirAbs, err := filepath.Abs(VarStringDir)
 	if err != nil {
 		return nil, err
 	}
 
 	transferData.Dir = dirAbs
-	transferData.Style = c.String("style")
+	transferData.Style = VarStringStyle
 	data, err := json.Marshal(transferData)
 	if err != nil {
 		return nil, err
@@ -113,7 +123,7 @@ func getCommand(arg string) (string, bool, error) {
 		return abs, false, nil
 	}
 
-	var defaultErr = errors.New("invalid plugin value " + arg)
+	defaultErr := errors.New("invalid plugin value " + arg)
 	if strings.HasPrefix(arg, "http") {
 		items := strings.Split(arg, "/")
 		if len(items) == 0 {
@@ -136,7 +146,7 @@ func getCommand(arg string) (string, bool, error) {
 	return arg, false, nil
 }
 
-func downloadFile(filepath string, url string) error {
+func downloadFile(filepath, url string) error {
 	resp, err := http.Get(url)
 	if err != nil {
 		return err
@@ -160,7 +170,7 @@ func downloadFile(filepath string, url string) error {
 // NewPlugin returns contextual resources when written in other languages
 func NewPlugin() (*Plugin, error) {
 	var plugin Plugin
-	content, err := ioutil.ReadAll(os.Stdin)
+	content, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return nil, err
 	}

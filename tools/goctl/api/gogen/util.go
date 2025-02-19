@@ -3,17 +3,15 @@ package gogen
 import (
 	"bytes"
 	"fmt"
-	goformat "go/format"
 	"io"
-	"path/filepath"
 	"strings"
 	"text/template"
 
 	"github.com/shuguocloud/go-zero/core/collection"
 	"github.com/shuguocloud/go-zero/tools/goctl/api/spec"
 	"github.com/shuguocloud/go-zero/tools/goctl/api/util"
-	ctlutil "github.com/shuguocloud/go-zero/tools/goctl/util"
-	"github.com/shuguocloud/go-zero/tools/goctl/util/ctx"
+	"github.com/shuguocloud/go-zero/tools/goctl/pkg/golang"
+	"github.com/shuguocloud/go-zero/tools/goctl/util/pathx"
 )
 
 type fileGenConfig struct {
@@ -24,7 +22,7 @@ type fileGenConfig struct {
 	category        string
 	templateFile    string
 	builtinTemplate string
-	data            interface{}
+	data            any
 }
 
 func genFile(c fileGenConfig) error {
@@ -41,7 +39,7 @@ func genFile(c fileGenConfig) error {
 	if len(c.category) == 0 || len(c.templateFile) == 0 {
 		text = c.builtinTemplate
 	} else {
-		text, err = ctlutil.LoadTemplate(c.category, c.templateFile, c.builtinTemplate)
+		text, err = pathx.LoadTemplate(c.category, c.templateFile, c.builtinTemplate)
 		if err != nil {
 			return err
 		}
@@ -54,37 +52,66 @@ func genFile(c fileGenConfig) error {
 		return err
 	}
 
-	code := formatCode(buffer.String())
+	code := golang.FormatCode(buffer.String())
 	_, err = fp.WriteString(code)
 	return err
 }
 
-func getParentPackage(dir string) (string, error) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return "", err
-	}
-
-	projectCtx, err := ctx.Prepare(abs)
-	if err != nil {
-		return "", err
-	}
-
-	return filepath.ToSlash(filepath.Join(projectCtx.Path, strings.TrimPrefix(projectCtx.WorkDir, projectCtx.Dir))), nil
-}
-
 func writeProperty(writer io.Writer, name, tag, comment string, tp spec.Type, indent int) error {
 	util.WriteIndent(writer, indent)
-	var err error
+	var (
+		err            error
+		isNestedStruct bool
+	)
+	structType, ok := tp.(spec.NestedStruct)
+	if ok {
+		isNestedStruct = true
+	}
 	if len(comment) > 0 {
 		comment = strings.TrimPrefix(comment, "//")
 		comment = "//" + comment
-		_, err = fmt.Fprintf(writer, "%s %s %s %s\n", strings.Title(name), tp.Name(), tag, comment)
-	} else {
-		_, err = fmt.Fprintf(writer, "%s %s %s\n", strings.Title(name), tp.Name(), tag)
 	}
 
-	return err
+	if isNestedStruct {
+		_, err = fmt.Fprintf(writer, "%s struct {\n", strings.Title(name))
+		if err != nil {
+			return err
+		}
+
+		if err := writeMember(writer, structType.Members); err != nil {
+			return err
+		}
+
+		_, err := fmt.Fprintf(writer, "} %s", tag)
+		if err != nil {
+			return err
+		}
+
+		if len(comment) > 0 {
+			_, err = fmt.Fprintf(writer, " %s", comment)
+			if err != nil {
+				return err
+			}
+		}
+		_, err = fmt.Fprint(writer, "\n")
+		if err != nil {
+			return err
+		}
+	} else {
+		if len(comment) > 0 {
+			_, err = fmt.Fprintf(writer, "%s %s %s %s\n", strings.Title(name), tp.Name(), tag, comment)
+			if err != nil {
+				return err
+			}
+		} else {
+			_, err = fmt.Fprintf(writer, "%s %s %s\n", strings.Title(name), tp.Name(), tag)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func getAuths(api *spec.ApiSpec) []string {
@@ -96,6 +123,17 @@ func getAuths(api *spec.ApiSpec) []string {
 		}
 	}
 	return authNames.KeysStr()
+}
+
+func getJwtTrans(api *spec.ApiSpec) []string {
+	jwtTransList := collection.NewSet()
+	for _, g := range api.Service.Groups {
+		jt := g.GetAnnotation(jwtTransKey)
+		if len(jt) > 0 {
+			jwtTransList.Add(jt)
+		}
+	}
+	return jwtTransList.KeysStr()
 }
 
 func getMiddleware(api *spec.ApiSpec) []string {
@@ -110,15 +148,6 @@ func getMiddleware(api *spec.ApiSpec) []string {
 	}
 
 	return result.KeysStr()
-}
-
-func formatCode(code string) string {
-	ret, err := goformat.Source([]byte(code))
-	if err != nil {
-		return code
-	}
-
-	return string(ret)
 }
 
 func responseGoTypeName(r spec.Route, pkg ...string) string {
@@ -194,4 +223,12 @@ func golangExpr(ty spec.Type, pkg ...string) string {
 	}
 
 	return ""
+}
+
+func getDoc(doc string) string {
+	if len(doc) == 0 {
+		return ""
+	}
+
+	return "// " + strings.Trim(doc, "\"")
 }

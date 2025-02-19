@@ -5,3 +5,4 @@
 修改熔断值numHistoryReasons由5到10，解决系统提示"circuit breaker is open"
 4. release v1.1.8 to v1.1.9
 添加dm8适配
+5. release v1.1.9 to v1.8.1

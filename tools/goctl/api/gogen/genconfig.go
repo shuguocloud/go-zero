@@ -1,6 +1,7 @@
 package gogen
 
 import (
+	_ "embed"
 	"fmt"
 	"strings"
 
@@ -11,23 +12,22 @@ import (
 )
 
 const (
-	configFile     = "config"
-	configTemplate = `package config
-
-import {{.authImport}}
-
-type Config struct {
-	rest.RestConf
-	{{.auth}}
-}
-`
+	configFile = "config"
 
 	jwtTemplate = ` struct {
 		AccessSecret string
 		AccessExpire int64
 	}
 `
+	jwtTransTemplate = ` struct {
+		Secret     string
+		PrevSecret string
+	}
+`
 )
+
+//go:embed config.tpl
+var configTemplate string
 
 func genConfig(dir string, cfg *config.Config, api *spec.ApiSpec) error {
 	filename, err := format.FileNamingFormat(cfg.NamingFormat, configFile)
@@ -35,12 +35,18 @@ func genConfig(dir string, cfg *config.Config, api *spec.ApiSpec) error {
 		return err
 	}
 
-	var authNames = getAuths(api)
+	authNames := getAuths(api)
 	var auths []string
 	for _, item := range authNames {
 		auths = append(auths, fmt.Sprintf("%s %s", item, jwtTemplate))
 	}
-	var authImportStr = fmt.Sprintf("\"%s/rest\"", vars.ProjectOpenSourceURL)
+
+	jwtTransNames := getJwtTrans(api)
+	var jwtTransList []string
+	for _, item := range jwtTransNames {
+		jwtTransList = append(jwtTransList, fmt.Sprintf("%s %s", item, jwtTransTemplate))
+	}
+	authImportStr := fmt.Sprintf("\"%s/rest\"", vars.ProjectOpenSourceURL)
 
 	return genFile(fileGenConfig{
 		dir:             dir,
@@ -53,6 +59,7 @@ func genConfig(dir string, cfg *config.Config, api *spec.ApiSpec) error {
 		data: map[string]string{
 			"authImport": authImportStr,
 			"auth":       strings.Join(auths, "\n"),
+			"jwtTrans":   strings.Join(jwtTransList, "\n"),
 		},
 	})
 }

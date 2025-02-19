@@ -1,7 +1,6 @@
 package p2c
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"math/rand"
@@ -23,35 +22,40 @@ const (
 	// Name is the name of p2c balancer.
 	Name = "p2c_ewma"
 
-	decayTime       = int64(time.Second * 10) // default value from finagle
-	forcePick       = int64(time.Second)
-	initSuccess     = 1000
+	// default value from finagle
+	decayTime = int64(time.Second * 10)
+	// if a node is not selected for a period of time, it is forcibly selected.
+	forcePick = int64(time.Second)
+	// initial success count
+	initSuccess = 1000
+	// success count to trigger throttling
 	throttleSuccess = initSuccess / 2
-	penalty         = int64(math.MaxInt32)
-	pickTimes       = 3
-	logInterval     = time.Minute
+	// penalty value for load calculation
+	penalty = int64(math.MaxInt32)
+	// number of pick attempts
+	pickTimes = 3
+	// log interval for statistics
+	logInterval = time.Minute
 )
+
+var emptyPickResult balancer.PickResult
 
 func init() {
 	balancer.Register(newBuilder())
 }
 
-type p2cPickerBuilder struct {
-}
+type p2cPickerBuilder struct{}
 
-func newBuilder() balancer.Builder {
-	return base.NewBalancerBuilder(Name, new(p2cPickerBuilder))
-}
-
-func (b *p2cPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn) balancer.Picker {
+func (b *p2cPickerBuilder) Build(info base.PickerBuildInfo) balancer.Picker {
+	readySCs := info.ReadySCs
 	if len(readySCs) == 0 {
 		return base.NewErrPicker(balancer.ErrNoSubConnAvailable)
 	}
 
-	var conns []*subConn
-	for addr, conn := range readySCs {
+	conns := make([]*subConn, 0, len(readySCs))
+	for conn, connInfo := range readySCs {
 		conns = append(conns, &subConn{
-			addr:    addr,
+			addr:    connInfo.Address,
 			conn:    conn,
 			success: initSuccess,
 		})
@@ -64,6 +68,10 @@ func (b *p2cPickerBuilder) Build(readySCs map[resolver.Address]balancer.SubConn)
 	}
 }
 
+func newBuilder() balancer.Builder {
+	return base.NewBalancerBuilder(Name, new(p2cPickerBuilder), base.Config{HealthCheck: true})
+}
+
 type p2cPicker struct {
 	conns []*subConn
 	r     *rand.Rand
@@ -71,15 +79,14 @@ type p2cPicker struct {
 	lock  sync.Mutex
 }
 
-func (p *p2cPicker) Pick(ctx context.Context, info balancer.PickInfo) (
-	conn balancer.SubConn, done func(balancer.DoneInfo), err error) {
+func (p *p2cPicker) Pick(_ balancer.PickInfo) (balancer.PickResult, error) {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
 	var chosen *subConn
 	switch len(p.conns) {
 	case 0:
-		return nil, nil, balancer.ErrNoSubConnAvailable
+		return emptyPickResult, balancer.ErrNoSubConnAvailable
 	case 1:
 		chosen = p.choose(p.conns[0], nil)
 	case 2:
@@ -104,7 +111,11 @@ func (p *p2cPicker) Pick(ctx context.Context, info balancer.PickInfo) (
 
 	atomic.AddInt64(&chosen.inflight, 1)
 	atomic.AddInt64(&chosen.requests, 1)
-	return chosen.conn, p.buildDoneFunc(chosen), nil
+
+	return balancer.PickResult{
+		SubConn: chosen.conn,
+		Done:    p.buildDoneFunc(chosen),
+	}, nil
 }
 
 func (p *p2cPicker) buildDoneFunc(c *subConn) func(info balancer.DoneInfo) {
@@ -117,6 +128,11 @@ func (p *p2cPicker) buildDoneFunc(c *subConn) func(info balancer.DoneInfo) {
 		if td < 0 {
 			td = 0
 		}
+
+		// As the td/decayTime value increases, indicating an increase in delay,
+		// the value of w (y-axis) will decrease, inversely proportional.
+		// The function curve of y = x^(-x) is as follows:
+		// https://github.com/shuguocloud/zero-doc/blob/main/doc/images/y_e_x.png?raw=true
 		w := math.Exp(float64(-td) / float64(decayTime))
 		lag := int64(now) - start
 		if lag < 0 {
@@ -126,6 +142,8 @@ func (p *p2cPicker) buildDoneFunc(c *subConn) func(info balancer.DoneInfo) {
 		if olag == 0 {
 			w = 0
 		}
+
+		// The smaller the value of w, the lower the impact of historical data.
 		atomic.StoreUint64(&c.lag, uint64(float64(olag)*w+float64(lag)*(1-w)))
 		success := initSuccess
 		if info.Err != nil && !codes.Acceptable(info.Err) {
@@ -164,7 +182,7 @@ func (p *p2cPicker) choose(c1, c2 *subConn) *subConn {
 }
 
 func (p *p2cPicker) logStats() {
-	var stats []string
+	stats := make([]string, 0, len(p.conns))
 
 	p.lock.Lock()
 	defer p.lock.Unlock()
@@ -178,14 +196,18 @@ func (p *p2cPicker) logStats() {
 }
 
 type subConn struct {
-	addr     resolver.Address
-	conn     balancer.SubConn
-	lag      uint64
+	// The request latency measured by the weighted moving average algorithm.
+	lag uint64
+
+	// The value represents the number of requests that are either pending or just
+	// starting at the current node, and it is obtained through atomic addition.
 	inflight int64
 	success  uint64
 	requests int64
 	last     int64
 	pick     int64
+	addr     resolver.Address
+	conn     balancer.SubConn
 }
 
 func (c *subConn) healthy() bool {

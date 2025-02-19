@@ -12,14 +12,14 @@ type (
 	PoolOption func(*Pool)
 
 	node struct {
-		item     interface{}
+		item     any
 		next     *node
 		lastUsed time.Duration
 	}
 
 	// A Pool is used to pool resources.
 	// The difference between sync.Pool is that:
-	//  1. the limit of the resouces
+	//  1. the limit of the resources
 	//  2. max age of the resources can be set
 	//  3. the method to destroy resources can be customized
 	Pool struct {
@@ -29,13 +29,13 @@ type (
 		lock    sync.Locker
 		cond    *sync.Cond
 		head    *node
-		create  func() interface{}
-		destroy func(interface{})
+		create  func() any
+		destroy func(any)
 	}
 )
 
 // NewPool returns a Pool.
-func NewPool(n int, create func() interface{}, destroy func(interface{}), opts ...PoolOption) *Pool {
+func NewPool(n int, create func() any, destroy func(any), opts ...PoolOption) *Pool {
 	if n <= 0 {
 		panic("pool size can't be negative or zero")
 	}
@@ -56,8 +56,8 @@ func NewPool(n int, create func() interface{}, destroy func(interface{}), opts .
 	return pool
 }
 
-// Get gets a resouce.
-func (p *Pool) Get() interface{} {
+// Get gets a resource.
+func (p *Pool) Get() any {
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
@@ -84,7 +84,7 @@ func (p *Pool) Get() interface{} {
 }
 
 // Put puts a resource back.
-func (p *Pool) Put(x interface{}) {
+func (p *Pool) Put(x any) {
 	if x == nil {
 		return
 	}
