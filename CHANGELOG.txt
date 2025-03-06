@@ -6,3 +6,8 @@
 4. release v1.1.8 to v1.1.9
 添加dm8适配
 5. release v1.1.9 to v1.8.1
+ 升级依赖版本如下：
+ go      v1.21.0
+ etcd    v3.4
+ go-zero v1.8.1
+
