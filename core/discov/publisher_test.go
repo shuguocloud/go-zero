@@ -11,7 +11,7 @@ import (
 	"github.com/shuguocloud/go-zero/core/discov/internal"
 	"github.com/shuguocloud/go-zero/core/lang"
 	"github.com/shuguocloud/go-zero/core/logx"
-	"go.etcd.io/etcd/clientv3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 func init() {

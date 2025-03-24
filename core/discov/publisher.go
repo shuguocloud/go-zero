@@ -7,7 +7,7 @@ import (
 	"github.com/shuguocloud/go-zero/core/proc"
 	"github.com/shuguocloud/go-zero/core/syncx"
 	"github.com/shuguocloud/go-zero/core/threading"
-	"go.etcd.io/etcd/clientv3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 type (

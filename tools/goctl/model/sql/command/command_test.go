@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/shuguocloud/go-zero/tools/goctl/model/sql/gen"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/shuguocloud/go-zero/tools/goctl/config"
 	"github.com/shuguocloud/go-zero/tools/goctl/util"
@@ -19,12 +21,15 @@ var (
 )
 
 func TestFromDDl(t *testing.T) {
-	err := fromDDl("./user.sql", t.TempDir(), cfg, true, false)
+	err := gen.Clean()
+	assert.Nil(t, err)
+
+	err = fromDDl("./user.sql", t.TempDir(), cfg, true, false, "go_zero")
 	assert.Equal(t, errNotMatched, err)
 
 	// case dir is not exists
 	unknownDir := filepath.Join(t.TempDir(), "test", "user.sql")
-	err = fromDDl(unknownDir, t.TempDir(), cfg, true, false)
+	err = fromDDl(unknownDir, t.TempDir(), cfg, true, false, "go_zero")
 	assert.True(t, func() bool {
 		switch err.(type) {
 		case *os.PathError:
@@ -35,7 +40,7 @@ func TestFromDDl(t *testing.T) {
 	}())
 
 	// case empty src
-	err = fromDDl("", t.TempDir(), cfg, true, false)
+	err = fromDDl("", t.TempDir(), cfg, true, false, "go_zero")
 	if err != nil {
 		assert.Equal(t, "expected path or path globbing patterns, but nothing found", err.Error())
 	}
@@ -65,7 +70,7 @@ func TestFromDDl(t *testing.T) {
 	_, err = os.Stat(user2Sql)
 	assert.Nil(t, err)
 
-	err = fromDDl(filepath.Join(tempDir, "user*.sql"), tempDir, cfg, true, false)
+	err = fromDDl(filepath.Join(tempDir, "user*.sql"), tempDir, cfg, true, false, "go_zero")
 	assert.Nil(t, err)
 
 	_, err = os.Stat(filepath.Join(tempDir, "usermodel.go"))
