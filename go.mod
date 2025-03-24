@@ -3,6 +3,7 @@ module github.com/shuguocloud/go-zero
 go 1.14
 
 require (
+	gitee.com/chunanyong/dm v1.8.19
 	github.com/ClickHouse/clickhouse-go v1.4.3
 	github.com/DATA-DOG/go-sqlmock v1.4.1
 	github.com/alicebob/miniredis/v2 v2.14.1
@@ -36,7 +37,7 @@ require (
 	github.com/stretchr/testify v1.7.0
 	github.com/urfave/cli v1.22.5
 	github.com/zeromicro/antlr v0.0.1
-	github.com/zeromicro/ddl-parser v0.0.0-20210712021150-63520aca7348 // indirect
+	github.com/zeromicro/ddl-parser v0.0.0-20210712021150-63520aca7348
 	go.etcd.io/etcd/api/v3 v3.5.0
 	go.etcd.io/etcd/client/v3 v3.5.0
 	go.uber.org/automaxprocs v1.3.0
