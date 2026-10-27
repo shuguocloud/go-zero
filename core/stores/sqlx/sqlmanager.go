@@ -14,12 +14,41 @@ import (
 )
 
 const (
-	maxIdleConns = 64
-	maxOpenConns = 64
-	maxLifetime  = time.Minute
+	// defaultMaxIdleConns is the default max idle connections of the db pool.
+	defaultMaxIdleConns = 64
+	// defaultMaxOpenConns is the default max open connections of the db pool.
+	defaultMaxOpenConns = 64
+	// defaultMaxLifetime is the default max lifetime of db connections.
+	defaultMaxLifetime = time.Minute
 	// pingTimeout is the max duration of the startup ping, Audit 027.
 	pingTimeout = 5 * time.Second
 )
+
+// Audit 015：池参数由 const 硬编码改为可通过 SetPoolOptions 覆盖的默认值
+var (
+	maxIdleConns = defaultMaxIdleConns
+	maxOpenConns = defaultMaxOpenConns
+	maxLifetime  = defaultMaxLifetime
+	maxIdleTime  time.Duration
+)
+
+// SetPoolOptions overrides the db pool settings for connections created after this call.
+// Non-positive values are ignored (keep current).
+// NOTE: connections are cached per DSN, so call this before the first use.
+func SetPoolOptions(maxIdle, maxOpen int, lifetime, idleTime time.Duration) {
+	if maxIdle > 0 {
+		maxIdleConns = maxIdle
+	}
+	if maxOpen > 0 {
+		maxOpenConns = maxOpen
+	}
+	if lifetime > 0 {
+		maxLifetime = lifetime
+	}
+	if idleTime > 0 {
+		maxIdleTime = idleTime
+	}
+}
 
 var connManager = syncx.NewResourceManager()
 
@@ -78,6 +107,9 @@ func newDBConnection(driverName, datasource string) (*sql.DB, error) {
 	conn.SetMaxIdleConns(maxIdleConns)
 	conn.SetMaxOpenConns(maxOpenConns)
 	conn.SetConnMaxLifetime(maxLifetime)
+	if maxIdleTime > 0 {
+		conn.SetConnMaxIdleTime(maxIdleTime)
+	}
 
 	// Audit 027：启动探活带超时，DB 不可达时快速失败并输出明确原因，避免启动长时间卡死
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
