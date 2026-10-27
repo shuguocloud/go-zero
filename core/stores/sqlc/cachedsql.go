@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/shuguocloud/go-zero/core/logx"
 	"github.com/shuguocloud/go-zero/core/stores/cache"
 	"github.com/shuguocloud/go-zero/core/stores/redis"
 	"github.com/shuguocloud/go-zero/core/stores/sqlx"
@@ -99,7 +100,8 @@ func (cc CachedConn) Exec(exec ExecFn, keys ...string) (sql.Result, error) {
 // ExecCtx runs given exec on given keys, and returns execution result.
 // If DB operation succeeds, it will delete cache with given keys,
 // if DB operation fails, it will return nil result and non-nil error,
-// if DB operation succeeds but cache deletion fails, it will return result and non-nil error.
+// if DB operation succeeds but cache deletion fails, it returns result and nil error,
+// and only logs the cache deletion error, because the data has been written successfully.
 func (cc CachedConn) ExecCtx(ctx context.Context, exec ExecCtxFn, keys ...string) (
 	sql.Result, error) {
 	res, err := exec(ctx, cc.db)
@@ -107,7 +109,11 @@ func (cc CachedConn) ExecCtx(ctx context.Context, exec ExecCtxFn, keys ...string
 		return nil, err
 	}
 
-	return res, cc.DelCacheCtx(ctx, keys...)
+	if err := cc.DelCacheCtx(ctx, keys...); err != nil {
+		logx.Errorf("failed to delete cache, keys: %v, error: %v", keys, err)
+	}
+
+	return res, nil
 }
 
 // ExecNoCache runs exec with given sql statement, without affecting cache.
