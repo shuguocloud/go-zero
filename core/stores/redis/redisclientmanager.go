@@ -12,14 +12,27 @@ import (
 const (
 	defaultDatabase = 0
 	maxRetries      = 3
-	idleConns       = 8
 )
 
 var (
 	clientManager = syncx.NewResourceManager()
 	// nodePoolSize is default pool size for node type of redis.
 	nodePoolSize = 10 * runtime.GOMAXPROCS(0)
+	// idleConns is default min idle connections for node type of redis.
+	idleConns = 8
 )
+
+// SetPoolOptions overrides pool size and min idle connections for redis clients
+// created after this call. Values <= 0 are ignored (keep current).
+// NOTE: clients are cached per addr, so call this before the first Redis use.
+func SetPoolOptions(poolSize, minIdle int) {
+	if poolSize > 0 {
+		nodePoolSize = poolSize
+	}
+	if minIdle > 0 {
+		idleConns = minIdle
+	}
+}
 
 func getClient(r *Redis) (*red.Client, error) {
 	val, err := clientManager.GetResource(r.Addr, func() (io.Closer, error) {
@@ -35,6 +48,7 @@ func getClient(r *Redis) (*red.Client, error) {
 			Password:     r.Pass,
 			DB:           defaultDatabase,
 			MaxRetries:   maxRetries,
+			PoolSize:     nodePoolSize,
 			MinIdleConns: idleConns,
 			TLSConfig:    tlsConfig,
 		})
