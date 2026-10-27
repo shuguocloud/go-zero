@@ -50,6 +50,9 @@ func NewServer(c RestConf, opts ...RunOption) (*Server, error) {
 		return nil, err
 	}
 
+	// Audit 020：JSON body 解析上限与 MaxBytes 联动，避免 8MB 硬编码截断大请求体
+	httpx.SetMaxBodyLen(c.MaxBytes)
+
 	server := &Server{
 		ngin:   newEngine(c),
 		router: router.NewRouter(),

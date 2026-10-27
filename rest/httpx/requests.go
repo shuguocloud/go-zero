@@ -18,12 +18,15 @@ const (
 	formKey           = "form"
 	pathKey           = "path"
 	maxMemory         = 32 << 20 // 32MB
-	maxBodyLen        = 8 << 20  // 8MB
+	defaultMaxBodyLen = 8 << 20  // 8MB
 	separator         = ";"
 	tokensInAttribute = 2
 )
 
 var (
+	// maxBodyLen 是 JSON body 的最大读取长度，可在启动期通过 SetMaxBodyLen 按服务 MaxBytes 覆盖。
+	maxBodyLen = int64(defaultMaxBodyLen)
+
 	formUnmarshaler = mapping.NewUnmarshaler(
 		formKey,
 		mapping.WithStringValues(),
@@ -142,6 +145,14 @@ func SetValidator(val Validator) {
 	validatorLock.Lock()
 	defer validatorLock.Unlock()
 	validator = val
+}
+
+// SetMaxBodyLen sets the max length of the json body, should be called before serving.
+// It keeps the JSON parsing limit consistent with RestConf.MaxBytes.
+func SetMaxBodyLen(maxLen int64) {
+	if maxLen > 0 {
+		maxBodyLen = maxLen
+	}
 }
 
 func getValidator() Validator {
