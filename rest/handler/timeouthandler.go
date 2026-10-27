@@ -136,6 +136,14 @@ var _ http.Pusher = (*timeoutWriter)(nil)
 
 // Flush implements the Flusher interface.
 func (tw *timeoutWriter) Flush() {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+
+	// Audit 022：超时后不再向底层 ResponseWriter 写入，避免与超时分支并发写同一响应
+	if tw.timedOut {
+		return
+	}
+
 	flusher, ok := tw.w.(http.Flusher)
 	if !ok {
 		return
@@ -146,7 +154,9 @@ func (tw *timeoutWriter) Flush() {
 		header[k] = v
 	}
 
-	tw.w.Write(tw.wbuf.Bytes())
+	if _, err := tw.w.Write(tw.wbuf.Bytes()); err != nil {
+		return
+	}
 	tw.wbuf.Reset()
 	flusher.Flush()
 }
