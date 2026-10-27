@@ -110,6 +110,11 @@ func (b *googleBreaker) doReq(req func() error, fallback Fallback, acceptable Ac
 		}
 	}()
 
+	// Audit 028：acceptable 为 nil 时兜底 defaultAcceptable，避免导出 API 误用导致 nil 函数调用 panic
+	if acceptable == nil {
+		acceptable = defaultAcceptable
+	}
+
 	err := req()
 	if acceptable(err) {
 		succ = true
