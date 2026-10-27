@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"runtime/debug"
 
 	"github.com/shuguocloud/go-zero/core/breaker"
+	"github.com/shuguocloud/go-zero/core/logx"
 )
 
 type (
@@ -175,10 +177,12 @@ func transactOnConn(ctx context.Context, conn *sql.DB, b beginnable,
 
 	defer func() {
 		if p := recover(); p != nil {
+			// Audit 025：panic 先记录完整堆栈，再转成可识别的 ErrTxPanic，避免调用方无法区分业务错误与 panic
+			logx.Errorf("panic in transaction: %v\n%s", p, debug.Stack())
 			if e := tx.Rollback(); e != nil {
-				err = fmt.Errorf("recover from %#v, rollback failed: %w", p, e)
+				err = fmt.Errorf("%w: %v, rollback failed: %w", ErrTxPanic, p, e)
 			} else {
-				err = fmt.Errorf("recover from %#v", p)
+				err = fmt.Errorf("%w: %v", ErrTxPanic, p)
 			}
 		} else if err != nil {
 			if e := tx.Rollback(); e != nil {
