@@ -5,20 +5,21 @@ import (
 	"sync/atomic"
 
 	"github.com/shuguocloud/go-zero/core/discov/internal"
+	"github.com/shuguocloud/go-zero/core/logx"
 	"github.com/shuguocloud/go-zero/core/syncx"
 )
 
 type (
-	subOptions struct {
-		exclusive bool
-	}
-
 	// SubOption defines the method to customize a Subscriber.
-	SubOption func(opts *subOptions)
+	SubOption func(sub *Subscriber)
 
-	// A Subscriber is used to subscribe the given key on a etcd cluster.
+	// A Subscriber is used to subscribe the given key on an etcd cluster.
 	Subscriber struct {
-		items *container
+		endpoints  []string
+		exclusive  bool
+		key        string
+		exactMatch bool
+		items      *container
 	}
 )
 
@@ -27,15 +28,16 @@ type (
 // key is the key to subscribe.
 // opts are used to customize the Subscriber.
 func NewSubscriber(endpoints []string, key string, opts ...SubOption) (*Subscriber, error) {
-	var subOpts subOptions
-	for _, opt := range opts {
-		opt(&subOpts)
-	}
-
 	sub := &Subscriber{
-		items: newContainer(subOpts.exclusive),
+		endpoints: endpoints,
+		key:       key,
 	}
-	if err := internal.GetRegistry().Monitor(endpoints, key, sub.items); err != nil {
+	for _, opt := range opts {
+		opt(sub)
+	}
+	sub.items = newContainer(sub.exclusive)
+
+	if err := internal.GetRegistry().Monitor(endpoints, key, sub.exactMatch, sub.items); err != nil {
 		return nil, err
 	}
 
@@ -47,6 +49,11 @@ func (s *Subscriber) AddListener(listener func()) {
 	s.items.addListener(listener)
 }
 
+// Close closes the subscriber.
+func (s *Subscriber) Close() {
+	internal.GetRegistry().Unmonitor(s.endpoints, s.key, s.exactMatch, s.items)
+}
+
 // Values returns all the subscription values.
 func (s *Subscriber) Values() []string {
 	return s.items.getValues()
@@ -55,8 +62,29 @@ func (s *Subscriber) Values() []string {
 // Exclusive means that key value can only be 1:1,
 // which means later added value will remove the keys associated with the same value previously.
 func Exclusive() SubOption {
-	return func(opts *subOptions) {
-		opts.exclusive = true
+	return func(sub *Subscriber) {
+		sub.exclusive = true
+	}
+}
+
+// WithExactMatch turn off querying using key prefixes.
+func WithExactMatch() SubOption {
+	return func(sub *Subscriber) {
+		sub.exactMatch = true
+	}
+}
+
+// WithSubEtcdAccount provides the etcd username/password.
+func WithSubEtcdAccount(user, pass string) SubOption {
+	return func(sub *Subscriber) {
+		RegisterAccount(sub.endpoints, user, pass)
+	}
+}
+
+// WithSubEtcdTLS provides the etcd CertFile/CertKeyFile/CACertFile.
+func WithSubEtcdTLS(certFile, certKeyFile, caFile string, insecureSkipVerify bool) SubOption {
+	return func(sub *Subscriber) {
+		logx.Must(RegisterTLS(sub.endpoints, certFile, certKeyFile, caFile, insecureSkipVerify))
 	}
 }
 

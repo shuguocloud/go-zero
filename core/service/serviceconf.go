@@ -1,12 +1,13 @@
 package service
 
 import (
-	"log"
-
 	"github.com/shuguocloud/go-zero/core/load"
 	"github.com/shuguocloud/go-zero/core/logx"
+	"github.com/shuguocloud/go-zero/core/proc"
 	"github.com/shuguocloud/go-zero/core/prometheus"
 	"github.com/shuguocloud/go-zero/core/stat"
+	"github.com/shuguocloud/go-zero/core/trace"
+	"github.com/shuguocloud/go-zero/internal/devserver"
 )
 
 const (
@@ -22,20 +23,27 @@ const (
 	ProMode = "pro"
 )
 
-// A ServiceConf is a service config.
-type ServiceConf struct {
-	Name       string
-	Log        logx.LogConf
-	Mode       string            `json:",default=pro,options=dev|test|rt|pre|pro"`
-	MetricsUrl string            `json:",optional"`
-	Prometheus prometheus.Config `json:",optional"`
-}
+type (
+	// DevServerConfig is type alias for devserver.Config
+	DevServerConfig = devserver.Config
+
+	// A ServiceConf is a service config.
+	ServiceConf struct {
+		Name       string
+		Log        logx.LogConf
+		Mode       string `json:",default=pro,options=dev|test|rt|pre|pro"`
+		MetricsUrl string `json:",optional"`
+		// Deprecated: please use DevServer
+		Prometheus prometheus.Config `json:",optional"`
+		Telemetry  trace.Config      `json:",optional"`
+		DevServer  DevServerConfig   `json:",optional"`
+		Shutdown   proc.ShutdownConf `json:",optional"`
+	}
+)
 
 // MustSetUp sets up the service, exits on error.
 func (sc ServiceConf) MustSetUp() {
-	if err := sc.SetUp(); err != nil {
-		log.Fatal(err)
-	}
+	logx.Must(sc.SetUp())
 }
 
 // SetUp sets up the service.
@@ -49,9 +57,20 @@ func (sc ServiceConf) SetUp() error {
 
 	sc.initMode()
 	prometheus.StartAgent(sc.Prometheus)
+
+	if len(sc.Telemetry.Name) == 0 {
+		sc.Telemetry.Name = sc.Name
+	}
+	trace.StartAgent(sc.Telemetry)
+	proc.Setup(sc.Shutdown)
+	proc.AddShutdownListener(func() {
+		trace.StopAgent()
+	})
+
 	if len(sc.MetricsUrl) > 0 {
 		stat.SetReportWriter(stat.NewRemoteWriter(sc.MetricsUrl))
 	}
+	devserver.StartAgent(sc.DevServer)
 
 	return nil
 }
