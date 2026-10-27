@@ -1,6 +1,7 @@
 package sqlx
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -16,6 +17,8 @@ const (
 	maxIdleConns = 64
 	maxOpenConns = 64
 	maxLifetime  = time.Minute
+	// pingTimeout is the max duration of the startup ping, Audit 027.
+	pingTimeout = 5 * time.Second
 )
 
 var connManager = syncx.NewResourceManager()
@@ -27,7 +30,7 @@ func getCachedSqlConn(driverName, server string) (*sql.DB, error) {
 			return nil, err
 		}
 
-		if driverName != mysqlDriverName {
+		if driverName == mysqlDriverName {
 			if cfg, e := mysql.ParseDSN(server); e != nil {
 				// if cannot parse, don't collect the metrics
 				logx.Error(e)
@@ -76,7 +79,11 @@ func newDBConnection(driverName, datasource string) (*sql.DB, error) {
 	conn.SetMaxOpenConns(maxOpenConns)
 	conn.SetConnMaxLifetime(maxLifetime)
 
-	if err := conn.Ping(); err != nil {
+	// Audit 027：启动探活带超时，DB 不可达时快速失败并输出明确原因，避免启动长时间卡死
+	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+	defer cancel()
+
+	if err := conn.PingContext(ctx); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
