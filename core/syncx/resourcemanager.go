@@ -1,11 +1,15 @@
 package syncx
 
 import (
+	"errors"
 	"io"
 	"sync"
 
 	"github.com/shuguocloud/go-zero/core/errorx"
 )
+
+// ErrManagerClosed is returned when GetResource is called after Close.
+var ErrManagerClosed = errors.New("resource manager is closed")
 
 // A ResourceManager is a manager that used to manage resources.
 type ResourceManager struct {
@@ -59,6 +63,12 @@ func (manager *ResourceManager) GetResource(key string, create func() (io.Closer
 
 		manager.lock.Lock()
 		defer manager.lock.Unlock()
+		// Audit 029：Close 后 resources 已置 nil，禁止写入避免 nil map panic；
+		// 同时关闭刚创建的资源防止泄漏
+		if manager.resources == nil {
+			_ = resource.Close()
+			return nil, ErrManagerClosed
+		}
 		manager.resources[key] = resource
 
 		return resource, nil
@@ -73,6 +83,13 @@ func (manager *ResourceManager) GetResource(key string, create func() (io.Closer
 // Inject injects the resource associated with given key.
 func (manager *ResourceManager) Inject(key string, resource io.Closer) {
 	manager.lock.Lock()
+	defer manager.lock.Unlock()
+
+	// Audit 029：Close 后禁止注入，避免 nil map panic；关闭资源防止泄漏
+	if manager.resources == nil {
+		_ = resource.Close()
+		return
+	}
+
 	manager.resources[key] = resource
-	manager.lock.Unlock()
 }
