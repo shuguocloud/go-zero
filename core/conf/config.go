@@ -6,6 +6,8 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/shuguocloud/go-zero/core/jsonx"
@@ -19,6 +21,7 @@ const (
 )
 
 var (
+	envPlaceholderPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 	fillDefaultUnmarshaler = mapping.NewUnmarshaler(jsonTagKey, mapping.WithDefault())
 	loaders                = map[string]func([]byte, any) error{
 		".json": LoadFromJsonBytes,
@@ -59,6 +62,10 @@ func Load(file string, v any, opts ...Option) error {
 	}
 
 	if opt.env {
+		if err = checkEnvPlaceholders(content); err != nil {
+			return err
+		}
+
 		return loader([]byte(os.ExpandEnv(string(content))), v)
 	}
 
@@ -127,6 +134,36 @@ func LoadFromYamlBytes(content []byte, v any) error {
 // Deprecated: use LoadFromYamlBytes instead.
 func LoadConfigFromYamlBytes(content []byte, v any) error {
 	return LoadFromYamlBytes(content, v)
+}
+
+// checkEnvPlaceholders 校验配置中 ${VAR} 占位符对应的环境变量均已设置且非空。
+// os.ExpandEnv 对未定义的变量会静默展开为空串，若不做前置校验，密钥类配置会被置空而服务"正常"启动。
+func checkEnvPlaceholders(content []byte) error {
+	var missing []string
+	seen := make(map[string]struct{})
+
+	for _, match := range envPlaceholderPattern.FindAllSubmatch(content, -1) {
+		name := string(match[1])
+		if len(os.Getenv(name)) > 0 {
+			continue
+		}
+
+		if _, ok := seen[name]; ok {
+			continue
+		}
+
+		seen[name] = struct{}{}
+		missing = append(missing, name)
+	}
+
+	if len(missing) == 0 {
+		return nil
+	}
+
+	sort.Strings(missing)
+
+	return fmt.Errorf("following environment variables are required but not set: %s",
+		strings.Join(missing, ", "))
 }
 
 // MustLoad loads config into v from path, exits on error.
