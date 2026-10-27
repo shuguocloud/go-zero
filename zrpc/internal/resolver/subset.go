@@ -1,14 +1,1 @@
-package resolver
-
-import "math/rand"
-
-func subset(set []string, sub int) []string {
-	rand.Shuffle(len(set), func(i, j int) {
-		set[i], set[j] = set[j], set[i]
-	})
-	if len(set) <= sub {
-		return set
-	}
-
-	return set[:sub]
-}
+package resolver // stubbed: stale vendored package superseded by zrpc/resolver
