@@ -26,12 +26,22 @@ func getCluster(r *Redis) (*red.ClusterClient, error) {
 				InsecureSkipVerify: true,
 			}
 		}
+		// Audit 016：实例级池参数优先，缺省回落到包级默认值；cluster 此前未传 PoolSize
+		poolSize := r.poolSize
+		if poolSize <= 0 {
+			poolSize = clusterPoolSize
+		}
+		minIdle := r.minIdleConns
+		if minIdle <= 0 {
+			minIdle = idleConns
+		}
 		store := red.NewClusterClient(&red.ClusterOptions{
 			Addrs:        splitClusterAddrs(r.Addr),
 			Username:     r.User,
 			Password:     r.Pass,
 			MaxRetries:   maxRetries,
-			MinIdleConns: idleConns,
+			PoolSize:     poolSize,
+			MinIdleConns: minIdle,
 			TLSConfig:    tlsConfig,
 		})
 
@@ -45,7 +55,7 @@ func getCluster(r *Redis) (*red.ClusterClient, error) {
 		connCollector.registerClient(&statGetter{
 			clientType: ClusterType,
 			key:        r.Addr,
-			poolSize:   clusterPoolSize,
+			poolSize:   poolSize,
 			poolStats: func() *red.PoolStats {
 				return store.PoolStats()
 			},

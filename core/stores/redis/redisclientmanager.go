@@ -42,14 +42,23 @@ func getClient(r *Redis) (*red.Client, error) {
 				InsecureSkipVerify: true,
 			}
 		}
+		// Audit 016：实例级池参数优先，缺省回落到包级默认值（可被 SetPoolOptions 覆盖）
+		poolSize := r.poolSize
+		if poolSize <= 0 {
+			poolSize = nodePoolSize
+		}
+		minIdle := r.minIdleConns
+		if minIdle <= 0 {
+			minIdle = idleConns
+		}
 		store := red.NewClient(&red.Options{
 			Addr:         r.Addr,
 			Username:     r.User,
 			Password:     r.Pass,
 			DB:           defaultDatabase,
 			MaxRetries:   maxRetries,
-			PoolSize:     nodePoolSize,
-			MinIdleConns: idleConns,
+			PoolSize:     poolSize,
+			MinIdleConns: minIdle,
 			TLSConfig:    tlsConfig,
 		})
 
@@ -63,7 +72,7 @@ func getClient(r *Redis) (*red.Client, error) {
 		connCollector.registerClient(&statGetter{
 			clientType: NodeType,
 			key:        r.Addr,
-			poolSize:   nodePoolSize,
+			poolSize:   poolSize,
 			poolStats: func() *red.PoolStats {
 				return store.PoolStats()
 			},

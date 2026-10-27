@@ -60,6 +60,9 @@ type (
 		tls   bool
 		brk   breaker.Breaker
 		hooks []red.Hook
+		// Audit 016：池参数支持经 RedisConf/Option 覆盖
+		poolSize     int
+		minIdleConns int
 	}
 
 	// RedisNode interface represents a redis node.
@@ -135,6 +138,12 @@ func NewRedis(conf RedisConf, opts ...Option) (*Redis, error) {
 	}
 	if conf.Tls {
 		opts = append([]Option{WithTLS()}, opts...)
+	}
+	if conf.PoolSize > 0 {
+		opts = append([]Option{WithPoolSize(conf.PoolSize)}, opts...)
+	}
+	if conf.MinIdleConns > 0 {
+		opts = append([]Option{WithMinIdleConns(conf.MinIdleConns)}, opts...)
 	}
 
 	rds := newRedis(conf.Host, opts...)
@@ -2434,6 +2443,20 @@ func WithTLS() Option {
 func WithUser(user string) Option {
 	return func(r *Redis) {
 		r.User = user
+	}
+}
+
+// WithPoolSize customizes the given Redis with given pool size.
+func WithPoolSize(size int) Option {
+	return func(r *Redis) {
+		r.poolSize = size
+	}
+}
+
+// WithMinIdleConns customizes the given Redis with given min idle connections.
+func WithMinIdleConns(num int) Option {
+	return func(r *Redis) {
+		r.minIdleConns = num
 	}
 }
 
