@@ -388,6 +388,9 @@ func (c *cluster) watch(cli EtcdClient, key watchKey, rev int64) {
 
 		// log the error and retry
 		logc.Error(cli.Ctx(), err)
+		// 退避后重连：故障持续时（如 auth token 持续失效、etcd 长时间不可达）避免无间隔空转，
+		// 否则会反复刷日志并占满 CPU。退避策略与 load() 保持一致。
+		time.Sleep(coolDownUnstable.AroundDuration(coolDownInterval))
 	}
 }
 
