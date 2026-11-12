@@ -463,10 +463,17 @@ func (c *cluster) watchConnState(cli EtcdClient) {
 func DialClient(endpoints []string) (EtcdClient, error) {
 	cfg := clientv3.Config{
 		Endpoints:           endpoints,
-		AutoSyncInterval:    autoSyncInterval,
 		DialTimeout:         DialTimeout,
 		RejectOldCluster:    true,
 		PermitWithoutStream: true,
+	}
+	// 单端点部署不做成员列表同步。clientv3 的 AutoSyncInterval 会周期性拉取集群成员，
+	// 并用成员通告的 advertise-client-urls 整体替换本地 endpoints；一旦通告地址不可达
+	// （机器换过 IP、advertise 配错、容器重建），客户端就会丢掉唯一可用地址，
+	// 表现为启动初期正常、约一分钟后开始 connection refused，且改配置也无效。
+	// 多端点时保留同步，以便自动感知集群成员扩缩。
+	if len(endpoints) > 1 {
+		cfg.AutoSyncInterval = autoSyncInterval
 	}
 	if account, ok := GetAccount(endpoints); ok {
 		cfg.Username = account.User
