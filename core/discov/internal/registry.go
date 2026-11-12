@@ -527,7 +527,26 @@ func DialClient(endpoints []string) (EtcdClient, error) {
 		cfg.TLS = tlsCfg
 	}
 
-	return clientv3.New(cfg)
+	cli, err := clientv3.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// 启动期认证探测：配置了账号密码时立即登录一次，让凭据错误在建立连接阶段就以
+	// 明确日志暴露。否则认证失败只会在后续 Get/Watch 中被静默重试，进程看似启动
+	// 成功、服务发现却始终为空，排查成本很高。
+	// 此处只记录日志、不阻断启动，保持原有失败语义不变。
+	if cfg.Username != "" && cfg.Password != "" {
+		probeCtx, cancel := context.WithTimeout(context.Background(), DialTimeout)
+		_, authErr := cli.Auth.Authenticate(probeCtx, cfg.Username, cfg.Password)
+		cancel()
+		if authErr != nil && !strings.Contains(authErr.Error(), "authentication is not enabled") {
+			logc.Errorf(context.Background(), "etcd 认证失败，endpoints=%v，user=%s：%v",
+				endpoints, cfg.Username, authErr)
+		}
+	}
+
+	return cli, nil
 }
 
 // isAuthError 判断错误是否属于鉴权类失败。这类错误只能通过重新登录解决，
