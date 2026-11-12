@@ -17,6 +17,8 @@ import (
 	"github.com/shuguocloud/go-zero/core/threading"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 const coolDownDeviation = 0.05
@@ -159,6 +161,10 @@ type (
 		watchGroup *threading.RoutineGroup
 		done       chan lang.PlaceholderType
 		lock       sync.RWMutex
+		// authClient 保存鉴权失效后重建的连接。一元调用（Get）不会触发 token 重登，
+		// 旧连接会一直带着失效 token 重试，因此需要用一条新连接重新认证。
+		authLock   sync.Mutex
+		authClient EtcdClient
 	}
 )
 
@@ -188,6 +194,13 @@ func (c *cluster) addListener(key watchKey, l UpdateListener) {
 }
 
 func (c *cluster) getClient() (EtcdClient, error) {
+	c.authLock.Lock()
+	authClient := c.authClient
+	c.authLock.Unlock()
+	if authClient != nil {
+		return authClient, nil
+	}
+
 	val, err := connManager.GetResource(c.key, func() (io.Closer, error) {
 		return c.newClient()
 	})
@@ -196,6 +209,27 @@ func (c *cluster) getClient() (EtcdClient, error) {
 	}
 
 	return val.(EtcdClient), nil
+}
+
+// reauth 在检测到鉴权失效时重建一条新连接（同一进程内只重建一次并复用）。
+// 不替换原有共享连接，避免影响其他 key 上已建立的 watch。
+func (c *cluster) reauth() (EtcdClient, error) {
+	c.authLock.Lock()
+	defer c.authLock.Unlock()
+
+	if c.authClient != nil {
+		return c.authClient, nil
+	}
+
+	cli, err := c.newClient()
+	if err != nil {
+		return nil, err
+	}
+
+	c.authClient = cli
+	logc.Infof(cli.Ctx(), "etcd 鉴权失效，已重建连接：%v", c.endpoints)
+
+	return cli, nil
 }
 
 func (c *cluster) getCurrent(key watchKey) []KV {
@@ -302,6 +336,16 @@ func (c *cluster) load(cli EtcdClient, key watchKey) int64 {
 		cancel()
 		if err == nil {
 			break
+		}
+
+		// 一元调用不会刷新 token：若携带的 token 已失效（simple token 到期、etcd 重启
+		// 导致 token 作废、密码被改），继续用同一连接重试永远不会成功。
+		// 这里换一条新连接，clientv3 会在建流/首次认证时重新登录。
+		if isAuthError(err) {
+			if fresh, cerr := c.reauth(); cerr == nil {
+				cli = fresh
+				continue
+			}
 		}
 
 		logc.Errorf(cli.Ctx(), "%s, key: %s, exactMatch: %t", err.Error(), key.key, key.exactMatch)
@@ -484,6 +528,24 @@ func DialClient(endpoints []string) (EtcdClient, error) {
 	}
 
 	return clientv3.New(cfg)
+}
+
+// isAuthError 判断错误是否属于鉴权类失败。这类错误只能通过重新登录解决，
+// 在原连接上重试没有意义。
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if status.Code(err) == codes.Unauthenticated {
+		return true
+	}
+	if errors.Is(err, rpctypes.ErrUserEmpty) || errors.Is(err, rpctypes.ErrAuthOldRevision) {
+		return true
+	}
+
+	msg := err.Error()
+	return strings.Contains(msg, "invalid auth token") ||
+		strings.Contains(msg, "user name is empty")
 }
 
 func calculateChanges(oldVals, newVals map[string]string) (add, remove []KV) {
