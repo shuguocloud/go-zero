@@ -135,6 +135,7 @@ if cfg.Username != "" && cfg.Password != "" {
    - `watch()` 是否已有退避
    - `clientv3.Config` 是否已按端点数决定 `AutoSyncInterval`
    - unary 拦截器是否已加入 `getToken`（若上游已补齐，P3 可整条丢弃）
+   - 最近一次核对结果见第五节，可直接对照
 3. 重放完成后打新 tag（沿用递增规则，如 `v1.10.1`），并同步更新本文件的版本对应表。
 
 ## 四、回归验证清单
@@ -153,3 +154,50 @@ gofmt -l core/discov/internal
 2. 停止 etcd：日志出现退避重连（约 1 秒一次，而非无间隔刷屏），地址列表不清空。
 3. 重启 etcd / 重置 root 密码：出现 `etcd 鉴权失效，已重建连接`，服务发现自动恢复。
 4. 故意配置错误密码：启动即出现 `etcd 认证失败，endpoints=… user=…`。
+
+## 五、上游核对记录
+
+### 2026-11-12（go-zero `v1.10.3` / etcd client `v3.7.3`）
+
+| 补丁 | go-zero v1.10.3 | etcd client v3.7.3 | 结论 |
+| --- | --- | --- | --- |
+| P1 watch 退避 | 已包含 | — | 可丢弃 |
+| P2 单端点 AutoSync | 未修复 | — | 保留 |
+| P3 load 鉴权重连 | 未修复 | 未修复 | 保留 |
+| P4 启动期认证探测 | 未修复 | — | 保留 |
+
+**P1 已被上游吸收。** 上游 `watch()` 已带同样的退避：
+
+```go
+// log the error and retry with cooldown to prevent CPU/disk exhaustion
+logc.Error(cli.Ctx(), err)
+time.Sleep(coolDownUnstable.AroundDuration(coolDownInterval))
+```
+
+位置：`core/discov/internal/registry.go`（v1.10.3 第 399-401 行）。下次 rebase 时直接丢弃 P1，无需解冲突。
+
+**P3 根因在 etcd 客户端，上游未修。** etcd v3.7.3 的一元拦截器在短路前没有 `getToken`
+（`client/v3/retry_interceptor.go` 第 41-52 行）：
+
+```go
+callOpts := reuseOrNewWithCallOptions(intOpts, retryOpts)
+// short circuit for simplicity, and avoiding allocations.
+if callOpts.max == 0 {
+    return invoker(ctx, method, req, reply, cc, grpcOpts...)
+}
+```
+
+同文件的 stream 拦截器（第 116-118 行）已补上，但只覆盖建流场景：
+
+```go
+// getToken automatically. Otherwise, auth token may be invalid after watch reconnection because the token has expired
+err := c.getToken(ctx)
+```
+
+`go-zero v1.10.3` 的 `discov` 中认证相关代码仅为凭据注入（第 479-481 行），
+没有任何鉴权错误识别或连接重建逻辑。
+
+**P2、P4 上游未修复**，继续维护。
+
+**复查触发条件**：etcd 发布说明出现 unary 拦截器鉴权相关改动，或 go-zero `discov`
+新增鉴权错误处理时，重新核对 P3；若 etcd 已补齐，P3 整条删除，不再重放。
