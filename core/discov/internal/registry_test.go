@@ -3,17 +3,18 @@ package internal
 import (
 	"context"
 	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
 	"github.com/shuguocloud/go-zero/core/contextx"
 	"github.com/shuguocloud/go-zero/core/lang"
 	"github.com/shuguocloud/go-zero/core/logx"
 	"github.com/shuguocloud/go-zero/core/stringx"
 	"github.com/shuguocloud/go-zero/core/threading"
+	"github.com/stretchr/testify/assert"
 	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -232,6 +233,72 @@ func TestCluster_Watch(t *testing.T) {
 			wg.Wait()
 		})
 	}
+}
+
+func TestClusterWatch_ResumeFromLastRevision(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	cli := NewMockEtcdClient(ctrl)
+	key := watchKey{key: "any"}
+	listener := NewMockUpdateListener(ctrl)
+	c := &cluster{
+		watchers: map[watchKey]*watchValue{
+			key: {
+				listeners: []UpdateListener{listener},
+				values:    make(map[string]string),
+			},
+		},
+		done: make(chan lang.PlaceholderType),
+	}
+	listener.EXPECT().OnAdd(KV{Key: "hello", Val: "world"})
+	cli.EXPECT().Ctx().Return(context.Background()).AnyTimes()
+
+	firstCh := make(chan clientv3.WatchResponse, 2)
+	secondCh := make(chan clientv3.WatchResponse)
+	firstCh <- clientv3.WatchResponse{
+		Header: etcdserverpb.ResponseHeader{Revision: 30},
+	}
+	firstCh <- clientv3.WatchResponse{
+		Header: etcdserverpb.ResponseHeader{Revision: 31},
+		Events: []*clientv3.Event{
+			{
+				Type: clientv3.EventTypePut,
+				Kv: &mvccpb.KeyValue{
+					Key:   []byte("hello"),
+					Value: []byte("world"),
+				},
+			},
+		},
+	}
+	close(firstCh)
+
+	var watchCalls int
+	cli.EXPECT().Watch(gomock.Any(), "any/", gomock.Any()).DoAndReturn(
+		func(_ context.Context, _ string, opts ...clientv3.OpOption) clientv3.WatchChan {
+			watchCalls++
+			op := clientv3.NewOp()
+			for _, opt := range opts {
+				opt(op)
+			}
+			assert.True(t, reflect.ValueOf(op).Elem().FieldByName("progressNotify").Bool())
+
+			switch watchCalls {
+			case 1:
+				assert.Equal(t, int64(11), op.Rev())
+				return firstCh
+			case 2:
+				assert.Equal(t, int64(32), op.Rev())
+				close(c.done)
+				return secondCh
+			default:
+				t.Fatalf("unexpected watch call %d", watchCalls)
+				return nil
+			}
+		}).Times(2)
+
+	c.watch(cli, key, 10)
+	assert.Equal(t, 2, watchCalls)
 }
 
 func TestClusterWatch_RespFailures(t *testing.T) {

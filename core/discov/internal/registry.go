@@ -482,7 +482,8 @@ func (c *cluster) reload(cli EtcdClient) {
 
 func (c *cluster) watch(cli EtcdClient, key watchKey, rev int64) {
 	for {
-		err := c.watchStream(cli, key, rev)
+		var err error
+		rev, err = c.watchStream(cli, key, rev)
 		if err == nil {
 			return
 		}
@@ -500,27 +501,34 @@ func (c *cluster) watch(cli EtcdClient, key watchKey, rev int64) {
 	}
 }
 
-func (c *cluster) watchStream(cli EtcdClient, key watchKey, rev int64) error {
+func (c *cluster) watchStream(cli EtcdClient, key watchKey, rev int64) (int64, error) {
 	ctx, rch := c.setupWatch(cli, key, rev)
 
 	for {
 		select {
 		case wresp, ok := <-rch:
 			if !ok {
-				return errClosed
+				return rev, errClosed
 			}
 			if wresp.Canceled {
-				return fmt.Errorf("etcd monitor chan has been canceled, error: %w", wresp.Err())
+				return rev, fmt.Errorf("etcd monitor chan has been canceled, error: %w", wresp.Err())
 			}
 			if wresp.Err() != nil {
-				return fmt.Errorf("etcd monitor chan error: %w", wresp.Err())
+				return rev, fmt.Errorf("etcd monitor chan error: %w", wresp.Err())
+			}
+
+			// progress notify 响应无事件，仅更新 revision，供断线重连时断点续传。
+			if wresp.IsProgressNotify() {
+				rev = wresp.Header.Revision
+				continue
 			}
 
 			c.handleWatchEvents(ctx, key, wresp.Events)
+			rev = wresp.Header.Revision
 		case <-ctx.Done():
-			return nil
+			return rev, nil
 		case <-c.done:
-			return nil
+			return rev, nil
 		}
 	}
 }
@@ -539,6 +547,9 @@ func (c *cluster) setupWatch(cli EtcdClient, key watchKey, rev int64) (context.C
 	if rev != 0 {
 		ops = append(ops, clientv3.WithRev(rev+1))
 	}
+	// 请求服务端在无事件时定期发送进度通知。普通事件与进度通知都会推进
+	// revision，断线重连可从最后处理位置继续，避免从初次 load 的位置重放。
+	ops = append(ops, clientv3.WithProgressNotify())
 
 	ctx, cancel := context.WithCancel(cli.Ctx())
 	if watcher, ok := c.watchers[key]; ok {

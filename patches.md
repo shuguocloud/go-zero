@@ -14,9 +14,10 @@
 | `v1.9.4` | `1598e75` | 2026-11-12 | 启动期认证探测 |
 | `v1.9.5` | `4d34a84` | 2026-11-12 | 仅文档：新增上游核对记录（代码与 `v1.9.4` 相同） |
 | `v1.9.6` | — | 2026-11-15 | etcd simple token 到期前预刷新连接，避免 watch 断连风暴 |
+| `v1.9.7` | — | 2026-11-15 | watch 加 WithProgressNotify + revision 断点续传，降低鉴权重连恢复开销 |
 
-业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.4`（`v1.9.5` 与之一致，无代码差异）。
-`v1.9.6` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
+业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.6`（含 P1-P5）。
+`v1.9.7` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
 本文档可能晚于表中最后一个 tag：后续纯文档修订只在 `main` 上提交，不再单独打 tag。
 
 ## 二、补丁明细
@@ -139,7 +140,7 @@ if cfg.Username != "" && cfg.Password != "" {
 （`cluster` 结构体新增 `refreshStop`、`newCluster` 启动刷新、新增 `startTokenRefresher` /
 `runTokenRefresher` / `refreshToken`）
 
-**现象**：etcd 配置 `auth-token: simple,ttl=86400` 时，simple token 在服务端内存中存储，
+**现象**：etcd 配置 `auth-token: simple` + `auth-token-ttl: 86400` 时，simple token 在服务端内存中存储，
 到期后服务端直接删除，所有 watch 流同时鉴权失败断开。大量服务实例同时重建 watch，
 瞬间产生大量 Range+Watch 请求打爆 etcd，CPU 持续高位。
 
@@ -149,8 +150,8 @@ if cfg.Username != "" && cfg.Password != "" {
 
 **改动**：
 
-1. `vars.go` 新增 `tokenTTL = 24h`（与服务端 `ttl=86400` 对齐）和
-   `tokenRefreshMargin = 10min`（到期前 10 分钟预刷新）。
+1. `vars.go` 新增 `tokenTTL = 24h`（与服务端 simple 的 `auth-token-ttl: 86400`
+   或 JWT 的 `ttl=24h` 对齐）和 `tokenRefreshMargin = 10min`（到期前 10 分钟预刷新）。
 2. `cluster` 结构体新增 `refreshStop chan struct{}`，用于停止刷新 goroutine。
 3. `newCluster()` 在配置了鉴权账号时启动 `startTokenRefresher()`。
 4. `runTokenRefresher()`：每 `tokenTTL - tokenRefreshMargin`（23h50m）触发一次
@@ -163,12 +164,45 @@ if cfg.Username != "" && cfg.Password != "" {
 导致 token 提前过期，P3 仍能在失效后重建连接恢复服务发现。
 
 **注意**：`tokenTTL` 硬编码为 24h，必须与服务端 `etcd.yaml` 的
-`auth-token: simple,ttl=86400` 保持一致。若服务端改了 TTL，这里需同步修改，否则
+`auth-token: simple` + `auth-token-ttl: 86400` 保持一致。若服务端改了 TTL，这里需同步修改，否则
 预刷新节奏会偏离实际到期时间。
+
+---
+
+### P6 `v1.9.7` — watch 加 WithProgressNotify + revision 断点续传
+
+**位置**：`core/discov/internal/registry.go`，`setupWatch()`、`watchStream()`、`watch()`
+
+**现象**：watch 断线重连时总是从 `load()` 返回的原始 revision 开始重新监听，
+导致重连后重复处理大量已知事件，增加客户端和服务端开销。空闲期间没有普通事件时，
+也无法通过进度通知推进已处理位置。
+
+**根因**：
+1. `setupWatch()` 未请求服务端发送 progress notify。
+2. `watchStream()` 只处理事件但不更新 revision，`watch()` 重连时使用的一直是
+   `load()` 返回的初始 revision，导致断线后从很旧的位置重放。
+
+**改动**：
+
+1. `setupWatch()` 增加 `clientv3.WithProgressNotify()`，请求服务端在无事件时
+   定期发送进度通知。
+2. `watchStream()` 返回值改为 `(int64, error)`，返回最后已处理的 revision：
+   - 收到 progress notify 响应时更新 revision（无事件，仅推进位置）
+   - 处理完普通事件后更新 revision 为 `wresp.Header.Revision`
+3. `watch()` 使用 `watchStream()` 返回的 revision 进行下次重连，并从
+   `revision + 1` 继续，避免重复处理已接收事件。
+4. 新增回归用例，覆盖 progress notify、普通事件、断线后按最新 revision 重建 watch。
+
+**与 JWT 的关系**：本补丁不解析 simple/JWT token，clientv3 对两种 token 透明处理。
+JWT 兼容性由 P3-P5 的鉴权失败重建、启动认证探测和到期前预刷新共同保障；
+P6 负责降低任意鉴权模式下 watch 断连后的恢复开销，并不是 JWT 的开关。
+
+**兼容性**：普通事件推进 revision 不依赖 progress notify；即使服务端未发送进度通知，
+断点续传仍然有效。进度通知周期由服务端版本与配置决定，客户端不硬编码该周期。
 
 ## 三、同步上游时的 rebase 指南
 
-1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.6`，冲突集中在
+1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.7`，冲突集中在
    `core/discov/internal/registry.go`，必要时手工重放。
 2. 每条补丁重放后核对以下上游实现是否已自带同类修复：
    - `watch()` 是否已有退避
