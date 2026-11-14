@@ -165,17 +165,22 @@ type (
 		// 旧连接会一直带着失效 token 重试，因此需要用一条新连接重新认证。
 		authLock   sync.Mutex
 		authClient EtcdClient
+		// refreshStop 用于停止 token 预刷新 goroutine。
+		refreshStop chan struct{}
 	}
 )
 
 func newCluster(endpoints []string) *cluster {
-	return &cluster{
-		endpoints:  endpoints,
-		key:        getClusterKey(endpoints),
-		watchers:   make(map[watchKey]*watchValue),
-		watchGroup: threading.NewRoutineGroup(),
-		done:       make(chan lang.PlaceholderType),
+	c := &cluster{
+		endpoints:   endpoints,
+		key:         getClusterKey(endpoints),
+		watchers:    make(map[watchKey]*watchValue),
+		watchGroup:  threading.NewRoutineGroup(),
+		done:        make(chan lang.PlaceholderType),
+		refreshStop: make(chan struct{}),
 	}
+	c.startTokenRefresher()
+	return c
 }
 
 func (c *cluster) addListener(key watchKey, l UpdateListener) {
@@ -230,6 +235,63 @@ func (c *cluster) reauth() (EtcdClient, error) {
 	logc.Infof(cli.Ctx(), "etcd 鉴权失效，已重建连接：%v", c.endpoints)
 
 	return cli, nil
+}
+
+// startTokenRefresher 在配置了鉴权账号时启动 token 预刷新 goroutine。
+// etcd simple token 到期后服务端会直接删除，所有 watch 流同时鉴权失败断开，
+// 大量实例同时重建 watch 会瞬间打爆 etcd。这里在到期前主动重建连接并迁移 watch。
+func (c *cluster) startTokenRefresher() {
+	if _, ok := GetAccount(c.endpoints); !ok {
+		return
+	}
+	go c.runTokenRefresher()
+}
+
+func (c *cluster) runTokenRefresher() {
+	// 刷新间隔 = TTL - 提前量，确保在 token 到期前完成重建。
+	interval := tokenTTL - tokenRefreshMargin
+	if interval <= 0 {
+		interval = tokenTTL / 2
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.refreshToken()
+		case <-c.refreshStop:
+			return
+		}
+	}
+}
+
+// refreshToken 主动新建一条带新 token 的连接，并把所有 watch 迁移过去，
+// 最后关闭旧连接。这样旧 token 到期时不会引发 watch 断连风暴。
+func (c *cluster) refreshToken() {
+	cli, err := c.newClient()
+	if err != nil {
+		logc.Errorf(context.Background(), "etcd token 预刷新：新建客户端失败 %v: %v", c.endpoints, err)
+		return
+	}
+
+	c.authLock.Lock()
+	oldCli := c.authClient
+	c.authClient = cli
+	c.authLock.Unlock()
+
+	// 把所有 watch 迁移到新连接
+	c.reload(cli)
+
+	// 关闭旧连接，避免连接泄漏
+	if oldCli != nil {
+		if err := oldCli.Close(); err != nil {
+			logc.Errorf(context.Background(), "etcd token 预刷新：关闭旧连接失败 %v", err)
+		}
+	}
+
+	logc.Infof(context.Background(), "etcd token 预刷新完成，已迁移 watch：%v", c.endpoints)
 }
 
 func (c *cluster) getCurrent(key watchKey) []KV {

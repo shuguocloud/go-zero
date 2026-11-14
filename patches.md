@@ -13,8 +13,10 @@
 | `v1.9.3` | `24ac732` | 2026-11-12 | load() 鉴权失败时重建连接 |
 | `v1.9.4` | `1598e75` | 2026-11-12 | 启动期认证探测 |
 | `v1.9.5` | `4d34a84` | 2026-11-12 | 仅文档：新增上游核对记录（代码与 `v1.9.4` 相同） |
+| `v1.9.6` | — | 2026-11-15 | etcd simple token 到期前预刷新连接，避免 watch 断连风暴 |
 
 业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.4`（`v1.9.5` 与之一致，无代码差异）。
+`v1.9.6` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
 本文档可能晚于表中最后一个 tag：后续纯文档修订只在 `main` 上提交，不再单独打 tag。
 
 ## 二、补丁明细
@@ -129,9 +131,44 @@ if cfg.Username != "" && cfg.Password != "" {
 
 **行为变化**：只记录日志，不阻断启动（保持原有失败语义）；etcd 未开启认证时自动跳过。
 
+---
+
+### P5 `v1.9.6` — simple token 到期前预刷新连接
+
+**位置**：`core/discov/internal/vars.go`（新增常量）、`core/discov/internal/registry.go`
+（`cluster` 结构体新增 `refreshStop`、`newCluster` 启动刷新、新增 `startTokenRefresher` /
+`runTokenRefresher` / `refreshToken`）
+
+**现象**：etcd 配置 `auth-token: simple,ttl=86400` 时，simple token 在服务端内存中存储，
+到期后服务端直接删除，所有 watch 流同时鉴权失败断开。大量服务实例同时重建 watch，
+瞬间产生大量 Range+Watch 请求打爆 etcd，CPU 持续高位。
+
+**根因**：P3 的 `reauth()` 只在 token 已失效后被动重建连接（触发条件是 `load()` 收到
+`Unauthenticated`）。simple token 到期是定时事件，所有实例同一时刻失效，被动重建无法
+避免断连风暴。
+
+**改动**：
+
+1. `vars.go` 新增 `tokenTTL = 24h`（与服务端 `ttl=86400` 对齐）和
+   `tokenRefreshMargin = 10min`（到期前 10 分钟预刷新）。
+2. `cluster` 结构体新增 `refreshStop chan struct{}`，用于停止刷新 goroutine。
+3. `newCluster()` 在配置了鉴权账号时启动 `startTokenRefresher()`。
+4. `runTokenRefresher()`：每 `tokenTTL - tokenRefreshMargin`（23h50m）触发一次
+   `refreshToken()`，到期前完成连接重建。
+5. `refreshToken()`：新建带新 token 的连接 → 替换 `authClient` → `reload()` 把所有
+   watch 迁移到新连接 → 关闭旧连接。
+
+**与 P3 的关系**：P3 是被动兜底（token 已失效后重登），P5 是主动预防（到期前换连接）。
+两者并存：正常情况下 P5 到期前换连接，watch 不会断；万一 P5 刷新失败或 TTL 配置不一致
+导致 token 提前过期，P3 仍能在失效后重建连接恢复服务发现。
+
+**注意**：`tokenTTL` 硬编码为 24h，必须与服务端 `etcd.yaml` 的
+`auth-token: simple,ttl=86400` 保持一致。若服务端改了 TTL，这里需同步修改，否则
+预刷新节奏会偏离实际到期时间。
+
 ## 三、同步上游时的 rebase 指南
 
-1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.4`，冲突集中在
+1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.6`，冲突集中在
    `core/discov/internal/registry.go`，必要时手工重放。
 2. 每条补丁重放后核对以下上游实现是否已自带同类修复：
    - `watch()` 是否已有退避
