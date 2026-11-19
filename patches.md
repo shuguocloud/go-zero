@@ -19,9 +19,10 @@
 | `v1.9.9` | — | 2026-11-19 | 失败重试指数退避、替换连接后关闭旧连、重载去抖，遏制过期 token 下的请求风暴 |
 | `v1.9.10` | — | 2026-11-19 | 去掉重复认证探测、预刷新提前量 30min、watch 重建错峰，降低 etcd 鉴权压力 |
 | `v1.9.11` | — | 2026-11-19 | 新增 P10：token TTL 与预刷新提前量可配置（EtcdConf 字段，默认 24h/30m） |
+| `v1.9.12` | — | 2026-11-19 | 新增 P11：修复 watchConnState goroutine 泄漏（连接替换后永久阻塞） |
 
-业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.11`（含 P1-P10）。
-`v1.9.11` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
+业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.12`（含 P1-P11）。
+`v1.9.12` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
 本文档可能晚于表中最后一个 tag：后续纯文档修订只在 `main` 上提交，不再单独打 tag。
 
 ## 二、补丁明细
@@ -336,9 +337,38 @@ Etcd:
 `go test ./core/discov/internal/` 存在 P8 遗留的 `watchConnState` goroutine 泄漏
 导致 `TestClusterWatch_RespFailures` 跨用例污染失败（v1.9.9 起即存在），与 P10 无关。
 
+### P11 `v1.9.12` — 修复 `watchConnState` goroutine 泄漏
+
+**位置**：`core/discov/internal/statewatcher.go`、`core/discov/internal/registry.go`、
+`core/syncx/resourcemanager.go`
+
+**背景**：P8 引入的连接状态监听 `watchConnState` 调用
+`stateWatcher.watch(conn)`，内部使用 `context.Background()` 且忽略
+`WaitForStateChange` 的 `false` 返回值。被 reauth/预刷新替换的旧连接在
+`Close()` 后状态停在 `Shutdown`，`WaitForStateChange` 永久阻塞，
+goroutine 与连接对象一起泄漏（每次重建连接泄漏 1 个）。
+
+同时 `newClient` 在启动 goroutine 后才异步调用 `cli.ActiveConnection()`，
+测试中该调用会落到已结束的 gomock controller 上，造成用例间相互污染。
+
+**改动**：
+
+1. `stateWatcher.watch(ctx, conn)` 增加 ctx：`WaitForStateChange` 返回 false 即退出；
+   ctx 为 nil 时兜底 `context.Background()`（防御异常实现）。
+2. `newClient` 改为**同步**取 `cli.ActiveConnection()`，为 nil 则不启动监听；
+   `watchConnState(cli, conn)` 使用 `cli.Ctx()`，客户端 Close 后监听随之退出。
+3. `syncx.ResourceManager` 新增 `Reset()`（关闭并清空、管理器仍可用）与
+   `Evict(key)`（仅移除不关闭），供测试隔离连接缓存。
+4. 测试：为直接构造的 cluster 使用唯一 key 并 `Evict`；
+   `TestRegistry_Monitor`/`TestRegistry_Unmonitor` 结束时 `Reset` 并恢复全局 clusters。
+
+**验证**：`go test ./core/discov/... -count=1` 全绿（此前
+`TestClusterWatch_RespFailures` 跨用例失败）。
+`go test -race` 在 Windows 本机因 race runtime 不可用而无法执行，需在 Linux 环境补验。
+
 ## 三、同步上游时的 rebase 指南
 
-1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.11`，冲突集中在
+1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.12`，冲突集中在
    `core/discov/internal/registry.go`，必要时手工重放。
 2. 每条补丁重放后核对以下上游实现是否已自带同类修复：
    - `watch()` 是否已有退避

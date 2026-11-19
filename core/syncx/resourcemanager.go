@@ -45,6 +45,31 @@ func (manager *ResourceManager) Close() error {
 	return be.Err()
 }
 
+// Evict removes the resource of the given key from the manager without closing it.
+func (manager *ResourceManager) Evict(key string) {
+	manager.lock.Lock()
+	defer manager.lock.Unlock()
+
+	delete(manager.resources, key)
+}
+
+// Reset closes and clears all resources, then keeps the manager usable.
+// Unlike Close, it does not invalidate the manager.
+func (manager *ResourceManager) Reset() error {
+	manager.lock.Lock()
+	defer manager.lock.Unlock()
+
+	var be errorx.BatchError
+	for key, resource := range manager.resources {
+		if err := resource.Close(); err != nil {
+			be.Add(err)
+		}
+		delete(manager.resources, key)
+	}
+
+	return be.Err()
+}
+
 // GetResource returns the resource associated with given key.
 func (manager *ResourceManager) GetResource(key string, create func() (io.Closer, error)) (
 	io.Closer, error) {

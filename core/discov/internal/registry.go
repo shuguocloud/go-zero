@@ -19,6 +19,7 @@ import (
 	"github.com/shuguocloud/go-zero/core/threading"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -576,7 +577,11 @@ func (c *cluster) newClient() (EtcdClient, error) {
 		return nil, err
 	}
 
-	go c.watchConnState(cli)
+	// 同步取连接再起监听：取不到（如测试 mock、连接尚未建立）就跳过，
+	// 避免 goroutine 在调用方返回后才访问客户端。
+	if conn := cli.ActiveConnection(); conn != nil {
+		go c.watchConnState(cli, conn)
+	}
 
 	return cli, nil
 }
@@ -737,7 +742,7 @@ func (c *cluster) setupWatch(cli EtcdClient, key watchKey, rev int64) (context.C
 	return ctx, rch
 }
 
-func (c *cluster) watchConnState(cli EtcdClient) {
+func (c *cluster) watchConnState(cli EtcdClient, conn *grpc.ClientConn) {
 	watcher := newStateWatcher()
 	watcher.addListener(func() {
 		// 该连接已被 reauth/预刷新替换时忽略其状态变化，
@@ -747,7 +752,8 @@ func (c *cluster) watchConnState(cli EtcdClient) {
 		}
 		go c.reload(cli)
 	})
-	watcher.watch(cli.ActiveConnection())
+	// cli.Ctx() 在客户端 Close 后结束，watcher 随之退出，不残留 goroutine。
+	watcher.watch(cli.Ctx(), conn)
 }
 
 // DialClient dials an etcd cluster with given endpoints.

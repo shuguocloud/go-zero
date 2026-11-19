@@ -322,9 +322,15 @@ func TestClusterWatch_RespFailures(t *testing.T) {
 			ch := make(chan clientv3.WatchResponse)
 			cli.EXPECT().Watch(gomock.Any(), "any/", gomock.Any()).Return(ch).AnyTimes()
 			cli.EXPECT().Ctx().Return(context.Background()).AnyTimes()
+			// reauth 会经 newClient 取活动连接；返回 nil 表示不启动状态监听。
+			cli.EXPECT().ActiveConnection().Return(nil).AnyTimes()
 			c := &cluster{
+				// 唯一 key：避免经 connManager 复用到其他用例缓存的 mock 连接。
+				key:      stringx.Rand(),
 				watchers: make(map[watchKey]*watchValue),
 			}
+			// 从连接缓存中移除本用例的 mock，避免后续用例的 Reset 关闭已结束的 mock。
+			defer connManager.Evict(c.key)
 			c.done = make(chan lang.PlaceholderType)
 			go func() {
 				ch <- resp
@@ -436,9 +442,12 @@ func TestClusterWatch_CloseChan(t *testing.T) {
 	ch := make(chan clientv3.WatchResponse)
 	cli.EXPECT().Watch(gomock.Any(), "any/", gomock.Any()).Return(ch).AnyTimes()
 	cli.EXPECT().Ctx().Return(context.Background()).AnyTimes()
+	cli.EXPECT().ActiveConnection().Return(nil).AnyTimes()
 	c := &cluster{
+		key:      stringx.Rand(),
 		watchers: make(map[watchKey]*watchValue),
 	}
+	defer connManager.Evict(c.key)
 	c.done = make(chan lang.PlaceholderType)
 	go func() {
 		close(ch)
@@ -484,9 +493,13 @@ func TestRegistry_Monitor(t *testing.T) {
 	svr, err := mockserver.StartMockServers(1)
 	assert.NoError(t, err)
 	svr.StartAt(0)
+	// 关闭测试创建的 etcd 连接，使 watchConnState 随 ctx 结束而退出，
+	// 避免 goroutine 泄漏到后续用例（并污染全局 registry/连接缓存）。
+	defer connManager.Reset()
 
 	endpoints := []string{svr.Servers[0].Address}
 	GetRegistry().lock.Lock()
+	oldClusters := GetRegistry().clusters
 	GetRegistry().clusters = map[string]*cluster{
 		getClusterKey(endpoints): {
 			watchers: map[watchKey]*watchValue{
@@ -502,6 +515,11 @@ func TestRegistry_Monitor(t *testing.T) {
 		},
 	}
 	GetRegistry().lock.Unlock()
+	defer func() {
+		GetRegistry().lock.Lock()
+		GetRegistry().clusters = oldClusters
+		GetRegistry().lock.Unlock()
+	}()
 	assert.Error(t, GetRegistry().Monitor(endpoints, "foo", false, new(mockListener)))
 }
 
@@ -509,10 +527,12 @@ func TestRegistry_Unmonitor(t *testing.T) {
 	svr, err := mockserver.StartMockServers(1)
 	assert.NoError(t, err)
 	svr.StartAt(0)
+	defer connManager.Reset()
 
 	_, cancel := context.WithCancel(context.Background())
 	endpoints := []string{svr.Servers[0].Address}
 	GetRegistry().lock.Lock()
+	oldClusters := GetRegistry().clusters
 	GetRegistry().clusters = map[string]*cluster{
 		getClusterKey(endpoints): {
 			watchers: map[watchKey]*watchValue{
@@ -529,6 +549,11 @@ func TestRegistry_Unmonitor(t *testing.T) {
 		},
 	}
 	GetRegistry().lock.Unlock()
+	defer func() {
+		GetRegistry().lock.Lock()
+		GetRegistry().clusters = oldClusters
+		GetRegistry().lock.Unlock()
+	}()
 	l := new(mockListener)
 	assert.NoError(t, GetRegistry().Monitor(endpoints, "foo", true, l))
 	watchVals := GetRegistry().clusters[getClusterKey(endpoints)].watchers[watchKey{

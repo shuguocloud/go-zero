@@ -56,11 +56,19 @@ func (sw *stateWatcher) updateState(conn etcdConn) {
 	}
 }
 
-func (sw *stateWatcher) watch(conn etcdConn) {
+// watch 监听连接状态变化，ctx 结束（连接被关闭）时退出。
+// 旧实现使用 context.Background()，且忽略 WaitForStateChange 的 false 返回值，
+// 连接被 reauth/预刷新替换后该 goroutine 会永久阻塞在状态等待上，造成泄漏。
+func (sw *stateWatcher) watch(ctx context.Context, conn etcdConn) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	sw.currentState = conn.GetState()
 	for {
-		if conn.WaitForStateChange(context.Background(), sw.currentState) {
-			sw.updateState(conn)
+		if !conn.WaitForStateChange(ctx, sw.currentState) {
+			return
 		}
+		sw.updateState(conn)
 	}
 }
