@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shuguocloud/go-zero/core/lang"
@@ -27,6 +28,14 @@ const (
 	// authRenewCooldown 限制鉴权失效后的连接重建频率。凭据确实错误时，
 	// 每个请求都重建连接只会把 etcd 打满，这里强制退避。
 	authRenewCooldown = 10 * time.Second
+	// authRetryMinBackoff/authRetryMaxBackoff 失败重试的指数退避区间。
+	// token 过期未被及时刷新、凭据错误或 etcd 不可达时，固定 1s 重试会让
+	// 每个 key 的 load/watch 持续打 etcd（日志刷屏 + CPU 飙升）；
+	// 连续失败时按 1s/2s/4s… 递增并封顶，成功一次即复位。
+	authRetryMinBackoff = time.Second
+	authRetryMaxBackoff = 30 * time.Second
+	// reloadCooldown 限制连接状态抖动触发的全量重载频率，避免反复重建全部 watch。
+	reloadCooldown = time.Second
 )
 
 var (
@@ -173,6 +182,10 @@ type (
 		authClient EtcdClient
 		// authRenewAt 记录最近一次重建鉴权连接的时间，用于限制重建频率。
 		authRenewAt time.Time
+		// authFailStreak 连续失败次数，用于计算指数退避（原子访问，跨 watch/load goroutine）。
+		authFailStreak int64
+		// reloadAt 记录最近一次全量重载时间，用于连接状态抖动去抖。
+		reloadAt time.Time
 		// refreshStop 用于停止 token 预刷新 goroutine。
 		refreshStop chan struct{}
 	}
@@ -254,9 +267,37 @@ func (c *cluster) reauth(stale EtcdClient) (EtcdClient, error) {
 	c.authRenewAt = time.Now()
 	c.authLock.Unlock()
 
+	// 关闭被替换的连接：其 watchConnState goroutine 随之停止，旧连接上残留的
+	// watch/请求也会尽快失败并切到新连接，避免旧连接继续携带过期 token 打 etcd。
+	if stale != nil && stale != cli {
+		if err := stale.Close(); err != nil {
+			logc.Errorf(cli.Ctx(), "关闭旧 etcd 连接失败：%v", err)
+		}
+	}
+
 	logc.Infof(cli.Ctx(), "etcd 鉴权失效，已重建连接：%v", c.endpoints)
 
 	return cli, nil
+}
+
+// nextAuthBackoff 累加连续失败次数并返回指数退避时长，封顶 authRetryMaxBackoff。
+func (c *cluster) nextAuthBackoff() time.Duration {
+	streak := atomic.AddInt64(&c.authFailStreak, 1)
+
+	backoff := authRetryMinBackoff
+	for i := int64(1); i < streak && backoff < authRetryMaxBackoff; i++ {
+		backoff *= 2
+	}
+	if backoff > authRetryMaxBackoff {
+		backoff = authRetryMaxBackoff
+	}
+
+	return coolDownUnstable.AroundDuration(backoff)
+}
+
+// resetAuthBackoff 在请求成功后复位退避计数，保证恢复后立即按最小间隔工作。
+func (c *cluster) resetAuthBackoff() {
+	atomic.StoreInt64(&c.authFailStreak, 0)
 }
 
 // Reauth recreates the connection for the given endpoints after an auth error.
@@ -337,7 +378,7 @@ func (c *cluster) refreshToken() {
 	c.authLock.Unlock()
 
 	// 把所有 watch 迁移到新连接
-	c.reload(cli)
+	c.reloadNow(cli)
 
 	// 关闭旧连接，避免连接泄漏
 	if oldCli != nil {
@@ -452,6 +493,7 @@ func (c *cluster) load(cli EtcdClient, key watchKey) int64 {
 
 		cancel()
 		if err == nil {
+			c.resetAuthBackoff()
 			break
 		}
 
@@ -467,8 +509,14 @@ func (c *cluster) load(cli EtcdClient, key watchKey) int64 {
 			}
 		}
 
+		// 当前连接可能已被 reauth/预刷新替换并关闭，在废弃连接上重试只会持续失败。
+		if cur, cerr := c.getClient(); cerr == nil && cur != cli {
+			cli = cur
+			continue
+		}
+
 		logc.Errorf(cli.Ctx(), "%s, key: %s, exactMatch: %t", err.Error(), key.key, key.exactMatch)
-		time.Sleep(coolDownUnstable.AroundDuration(coolDownInterval))
+		time.Sleep(c.nextAuthBackoff())
 	}
 
 	var kvs []KV
@@ -511,7 +559,23 @@ func (c *cluster) newClient() (EtcdClient, error) {
 }
 
 func (c *cluster) reload(cli EtcdClient) {
+	c.reloadWith(cli, false)
+}
+
+// reloadNow 强制执行一次全量重载，供 token 预刷新迁移 watch 使用（不能去抖）。
+func (c *cluster) reloadNow(cli EtcdClient) {
+	c.reloadWith(cli, true)
+}
+
+func (c *cluster) reloadWith(cli EtcdClient, force bool) {
 	c.lock.Lock()
+	// 连接状态抖动（Ready <-> TransientFailure）会在短时间内反复触发 listener，
+	// 去抖后只做一次全量重载，避免反复重建全部 watch 形成扫描风暴。
+	if !force && time.Since(c.reloadAt) < reloadCooldown {
+		c.lock.Unlock()
+		return
+	}
+	c.reloadAt = time.Now()
 	// cancel the previous watches
 	close(c.done)
 	c.watchGroup.Wait()
@@ -542,6 +606,7 @@ func (c *cluster) watch(cli EtcdClient, key watchKey, rev int64) {
 		var err error
 		rev, err = c.watchStream(cli, key, rev)
 		if err == nil {
+			c.resetAuthBackoff()
 			return
 		}
 
@@ -561,11 +626,17 @@ func (c *cluster) watch(cli EtcdClient, key watchKey, rev int64) {
 			}
 		}
 
+		// 当前连接可能已被 reauth/预刷新替换并关闭，在废弃连接上重试只会持续失败。
+		if cur, cerr := c.getClient(); cerr == nil && cur != cli {
+			cli = cur
+			continue
+		}
+
 		// log the error and retry
 		logc.Error(cli.Ctx(), err)
 		// 退避后重连：故障持续时（如 auth token 持续失效、etcd 长时间不可达）避免无间隔空转，
-		// 否则会反复刷日志并占满 CPU。退避策略与 load() 保持一致。
-		time.Sleep(coolDownUnstable.AroundDuration(coolDownInterval))
+		// 否则会反复刷日志并占满 CPU。连续失败时指数退避并封顶，成功一次即复位。
+		time.Sleep(c.nextAuthBackoff())
 	}
 }
 
@@ -639,6 +710,11 @@ func (c *cluster) setupWatch(cli EtcdClient, key watchKey, rev int64) (context.C
 func (c *cluster) watchConnState(cli EtcdClient) {
 	watcher := newStateWatcher()
 	watcher.addListener(func() {
+		// 该连接已被 reauth/预刷新替换时忽略其状态变化，
+		// 否则会用携带过期 token 的废弃连接触发一次全量重载。
+		if cur, err := c.getClient(); err == nil && cur != cli {
+			return
+		}
 		go c.reload(cli)
 	})
 	watcher.watch(cli.ActiveConnection())

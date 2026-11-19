@@ -16,9 +16,10 @@
 | `v1.9.6` | — | 2026-11-15 | etcd simple token 到期前预刷新连接，避免 watch 断连风暴 |
 | `v1.9.7` | — | 2026-11-15 | watch 加 WithProgressNotify + revision 断点续传，降低鉴权重连恢复开销 |
 | `v1.9.8` | — | 2026-11-19 | 鉴权失效后重建连接并加冷却，预刷新叠加抖动，消除过期 token 空转 |
+| `v1.9.9` | — | 2026-11-19 | 失败重试指数退避、替换连接后关闭旧连、重载去抖，遏制过期 token 下的请求风暴 |
 
-业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.8`（含 P1-P7）。
-`v1.9.8` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
+业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.9`（含 P1-P8）。
+`v1.9.9` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
 本文档可能晚于表中最后一个 tag：后续纯文档修订只在 `main` 上提交，不再单独打 tag。
 
 ## 二、补丁明细
@@ -233,9 +234,41 @@ P6 负责降低任意鉴权模式下 watch 断连后的恢复开销，并不是 
 
 **验证**：`go build ./core/discov/...`、`go vet ./core/discov/...` 通过。
 
+### P8 `v1.9.9` — 失败重试指数退避 + 替换连接后关闭旧连 + 重载去抖
+
+**位置**：`core/discov/internal/registry.go`（`load()`、`watch()`、`reauth()`、`reload()`、`watchConnState()`）
+
+**现象**：token 过期或凭据错误时，etcd 服务端同一毫秒内成片出现
+`auth/jwt.go failed to parse a JWT token: Token is expired` 与
+`auth/store.go invalid auth token`（同一 token 指纹反复出现），etcd 进程 CPU 161%、
+业务进程（sns-api）CPU 119%。
+
+**根因**（P7 消除空转后仍存在的放大源）：
+1. `load()`/`watch()` 失败重试固定 1s，凭据长期错误时请求量恒定、不随时间衰减。
+2. `reauth()` 替换连接后旧连接未关闭，其 `watchConnState` goroutine 常驻；
+   旧连接一旦状态抖动，就会用携带过期 token 的连接触发一次全量重载。
+3. 连接状态抖动（Ready/TransientFailure 交替）会连续触发多次全量重载，
+   每个 key 都要重建 load + watch，形成扫描风暴。
+4. 旧 watch/load 持有已被替换或关闭的连接继续重试，失败日志持续刷屏。
+
+**改动**：
+1. 指数退避：`authRetryMinBackoff = 1s` 起，按连续失败次数递增，封顶
+   `authRetryMaxBackoff = 30s`；任意一次成功即复位（`resetAuthBackoff`）。
+2. `reauth()` 在切换到新连接后关闭被替换的连接，其状态监听 goroutine 随之停止。
+3. `reload()` 增加 `reloadCooldown = 1s` 去抖；预刷新迁移 watch 走 `reloadNow()`
+   强制重载，不受去抖影响。
+4. `watchConnState()` 的 listener 先确认该连接仍是当前活动连接，否则忽略其状态事件。
+5. `load()`/`watch()` 重试前通过 `getClient()` 切到当前活动连接，
+   避免在废弃连接上空转到退避上限。
+
+**兼容性**：故障持续时重试间隔逐步拉长（最长 30s），恢复后立即回到 1s 级；
+预刷新迁移与正常 watch 行为不变。
+
+**验证**：`go build ./core/discov/...`、`go vet ./core/discov/...` 通过。
+
 ## 三、同步上游时的 rebase 指南
 
-1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.8`，冲突集中在
+1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.9`，冲突集中在
    `core/discov/internal/registry.go`，必要时手工重放。
 2. 每条补丁重放后核对以下上游实现是否已自带同类修复：
    - `watch()` 是否已有退避
