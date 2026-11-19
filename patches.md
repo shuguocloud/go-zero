@@ -17,9 +17,10 @@
 | `v1.9.7` | — | 2026-11-15 | watch 加 WithProgressNotify + revision 断点续传，降低鉴权重连恢复开销 |
 | `v1.9.8` | — | 2026-11-19 | 鉴权失效后重建连接并加冷却，预刷新叠加抖动，消除过期 token 空转 |
 | `v1.9.9` | — | 2026-11-19 | 失败重试指数退避、替换连接后关闭旧连、重载去抖，遏制过期 token 下的请求风暴 |
+| `v1.9.10` | — | 2026-11-19 | 去掉重复认证探测、预刷新提前量 30min、watch 重建错峰，降低 etcd 鉴权压力 |
 
-业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.9`（含 P1-P8）。
-`v1.9.9` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
+业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.10`（含 P1-P9）。
+`v1.9.10` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
 本文档可能晚于表中最后一个 tag：后续纯文档修订只在 `main` 上提交，不再单独打 tag。
 
 ## 二、补丁明细
@@ -266,9 +267,35 @@ P6 负责降低任意鉴权模式下 watch 断连后的恢复开销，并不是 
 
 **验证**：`go build ./core/discov/...`、`go vet ./core/discov/...` 通过。
 
+### P9 `v1.9.10` — 降低 etcd 鉴权请求量：去重复探测、30min 提前量、watch 重建错峰
+
+**位置**：`core/discov/internal/registry.go`（`DialClient()`、`reload()`、`load()`、`watch()`）、
+`core/discov/internal/vars.go`（`tokenRefreshMargin`）
+
+**背景**：clientv3 在**每次建立流之前**都会执行一次 `getToken` → `Authenticate`
+（`retry_interceptor.go` 的 `streamClientInterceptor`），而 `getToken` 不做缓存判断。
+因此"重建全部 watch"会等同于"并发发起 N 次鉴权请求"，在 ARM64 上单次鉴权可达
+350–447ms，容易在 etcd 侧形成 CPU 尖峰。
+
+**改动**：
+
+1. 删除 `DialClient()` 的启动认证探测。`clientv3.New` 内部已执行 `getToken`
+   并在失败时 `Close` 后返回错误，额外探测使每次重建连接多打一次 `Authenticate`
+   （鉴权自愈与预刷新都会走到这里）。
+2. `tokenRefreshMargin` 由 `10min` 调整为 `30min`：预刷新需要新建连接（1 次
+   `Authenticate`）+ 迁移全部 watch（每条流 1 次 `Authenticate`），10 分钟余量偏紧。
+3. `reload()` 启动 watch 时按 20ms 间隔依次进行（`watchMigrateStagger`），
+   把并发鉴权尖峰摊平到数百毫秒内。
+4. 退避等待改为可被 `c.done` 打断（`sleepOrDone`），避免 `reload()` 持锁
+   `watchGroup.Wait()` 被最长 30s 的重试退避阻塞。
+
+**兼容性**：正常运行无行为变化；鉴权失败期间的请求量与尖峰显著下降。
+
+**验证**：`go build ./core/discov/...`、`go vet ./core/discov/...` 通过。
+
 ## 三、同步上游时的 rebase 指南
 
-1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.9`，冲突集中在
+1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.10`，冲突集中在
    `core/discov/internal/registry.go`，必要时手工重放。
 2. 每条补丁重放后核对以下上游实现是否已自带同类修复：
    - `watch()` 是否已有退避

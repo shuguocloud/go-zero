@@ -36,6 +36,10 @@ const (
 	authRetryMaxBackoff = 30 * time.Second
 	// reloadCooldown 限制连接状态抖动触发的全量重载频率，避免反复重建全部 watch。
 	reloadCooldown = time.Second
+	// watchMigrateStagger 全量重载时相邻 watch 的启动间隔。clientv3 每建一条
+	// watch 流都会先 Authenticate 一次，多个 key 同时重建会在 etcd 侧形成
+	// 鉴权尖峰（key 数越多越明显），这里把启动时刻依次错开摊平。
+	watchMigrateStagger = 20 * time.Millisecond
 )
 
 var (
@@ -295,6 +299,21 @@ func (c *cluster) nextAuthBackoff() time.Duration {
 	return coolDownUnstable.AroundDuration(backoff)
 }
 
+// sleepOrDone 在等待期间响应重载信号（c.done 关闭）。返回 false 表示
+// 期间发生了重载，调用方应立即退出当前重试循环，避免 reload 持锁 Wait 被
+// 长达 authRetryMaxBackoff 的退避阻塞。
+func (c *cluster) sleepOrDone(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-c.done:
+		return false
+	}
+}
+
 // resetAuthBackoff 在请求成功后复位退避计数，保证恢复后立即按最小间隔工作。
 func (c *cluster) resetAuthBackoff() {
 	atomic.StoreInt64(&c.authFailStreak, 0)
@@ -516,7 +535,9 @@ func (c *cluster) load(cli EtcdClient, key watchKey) int64 {
 		}
 
 		logc.Errorf(cli.Ctx(), "%s, key: %s, exactMatch: %t", err.Error(), key.key, key.exactMatch)
-		time.Sleep(c.nextAuthBackoff())
+		if !c.sleepOrDone(c.nextAuthBackoff()) {
+			return 0
+		}
 	}
 
 	var kvs []KV
@@ -592,9 +613,14 @@ func (c *cluster) reloadWith(cli EtcdClient, force bool) {
 	c.lock.Unlock()
 
 	// start new watches
-	for _, key := range keys {
+	// 按固定间隔依次启动：clientv3 建流前会 Authenticate，同时重建会形成鉴权尖峰。
+	for i, key := range keys {
 		k := key
+		stagger := time.Duration(i) * watchMigrateStagger
 		c.watchGroup.Run(func() {
+			if stagger > 0 && !c.sleepOrDone(stagger) {
+				return
+			}
 			rev := c.load(cli, k)
 			c.watch(cli, k, rev)
 		})
@@ -636,7 +662,9 @@ func (c *cluster) watch(cli EtcdClient, key watchKey, rev int64) {
 		logc.Error(cli.Ctx(), err)
 		// 退避后重连：故障持续时（如 auth token 持续失效、etcd 长时间不可达）避免无间隔空转，
 		// 否则会反复刷日志并占满 CPU。连续失败时指数退避并封顶，成功一次即复位。
-		time.Sleep(c.nextAuthBackoff())
+		if !c.sleepOrDone(c.nextAuthBackoff()) {
+			return
+		}
 	}
 }
 
