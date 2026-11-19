@@ -749,19 +749,9 @@ func DialClient(endpoints []string) (EtcdClient, error) {
 		return nil, err
 	}
 
-	// 启动期认证探测：配置了账号密码时立即登录一次，让凭据错误在建立连接阶段就以
-	// 明确日志暴露。否则认证失败只会在后续 Get/Watch 中被静默重试，进程看似启动
-	// 成功、服务发现却始终为空，排查成本很高。
-	// 此处只记录日志、不阻断启动，保持原有失败语义不变。
-	if cfg.Username != "" && cfg.Password != "" {
-		probeCtx, cancel := context.WithTimeout(context.Background(), DialTimeout)
-		_, authErr := cli.Auth.Authenticate(probeCtx, cfg.Username, cfg.Password)
-		cancel()
-		if authErr != nil && !strings.Contains(authErr.Error(), "authentication is not enabled") {
-			logc.Errorf(context.Background(), "etcd 认证失败，endpoints=%v，user=%s：%v",
-				endpoints, cfg.Username, authErr)
-		}
-	}
+	// 此处不再做认证探测：clientv3.New 内部已执行一次 Authenticate（getToken），
+	// 凭据错误时会关闭连接并返回错误。额外探测会让每次重建连接（鉴权自愈、
+	// token 预刷新）都多打一次 Authenticate，在鉴权失败场景下放大 etcd 压力。
 
 	return cli, nil
 }

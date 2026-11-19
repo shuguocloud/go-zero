@@ -15,7 +15,10 @@ const (
 	// 若服务端改了 TTL，这里需要同步调整，否则预刷新节奏会偏离实际到期时间。
 	tokenTTL = 24 * time.Hour
 	// tokenRefreshMargin 在 token 到期前多久预刷新，避免到期瞬间所有 watch 同时断连。
-	tokenRefreshMargin = 10 * time.Minute
+	// 取 30 分钟：预刷新需要新建连接（一次 Authenticate）并迁移全部 watch
+	//（每条 watch 建流时 clientv3 都会再 Authenticate 一次），在 ARM64 上单次
+	// 鉴权可达数百毫秒，10 分钟余量偏紧，容易踩到到期边界。
+	tokenRefreshMargin = 30 * time.Minute
 )
 
 var (
