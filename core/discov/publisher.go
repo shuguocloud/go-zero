@@ -115,6 +115,15 @@ func (p *Publisher) doRegister() (internal.EtcdClient, error) {
 	}
 
 	p.lease, err = p.register(cli)
+	// 鉴权失效后原连接不会自动重新登录，续租每秒重试只会在 etcd 侧形成
+	// 无效鉴权风暴。重建连接后重试一次。
+	if err != nil && internal.IsAuthError(err) {
+		if fresh, rerr := internal.GetRegistry().Reauth(p.endpoints); rerr == nil {
+			cli = fresh
+			p.lease, err = p.register(cli)
+		}
+	}
+
 	return cli, err
 }
 

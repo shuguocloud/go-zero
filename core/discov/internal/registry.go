@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -21,7 +22,12 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const coolDownDeviation = 0.05
+const (
+	coolDownDeviation = 0.05
+	// authRenewCooldown 限制鉴权失效后的连接重建频率。凭据确实错误时，
+	// 每个请求都重建连接只会把 etcd 打满，这里强制退避。
+	authRenewCooldown = 10 * time.Second
+)
 
 var (
 	registry = Registry{
@@ -165,6 +171,8 @@ type (
 		// 旧连接会一直带着失效 token 重试，因此需要用一条新连接重新认证。
 		authLock   sync.Mutex
 		authClient EtcdClient
+		// authRenewAt 记录最近一次重建鉴权连接的时间，用于限制重建频率。
+		authRenewAt time.Time
 		// refreshStop 用于停止 token 预刷新 goroutine。
 		refreshStop chan struct{}
 	}
@@ -216,25 +224,56 @@ func (c *cluster) getClient() (EtcdClient, error) {
 	return val.(EtcdClient), nil
 }
 
-// reauth 在检测到鉴权失效时重建一条新连接（同一进程内只重建一次并复用）。
+// reauth 在检测到鉴权失效时重建一条新连接。
+// stale 是检出鉴权失败时正在使用的连接：
+//   - 若期间已有其他 goroutine 重建过连接，直接复用，避免并发重复重建；
+//   - 若距上次重建不足 authRenewCooldown，返回原连接让调用方退避，
+//     避免凭据错误时每秒重建连接、在 etcd 侧形成无效鉴权风暴。
+//
 // 不替换原有共享连接，避免影响其他 key 上已建立的 watch。
-func (c *cluster) reauth() (EtcdClient, error) {
+func (c *cluster) reauth(stale EtcdClient) (EtcdClient, error) {
 	c.authLock.Lock()
-	defer c.authLock.Unlock()
-
-	if c.authClient != nil {
-		return c.authClient, nil
+	if c.authClient != nil && c.authClient != stale {
+		cli := c.authClient
+		c.authLock.Unlock()
+		return cli, nil
+	}
+	if c.authClient != nil && time.Since(c.authRenewAt) < authRenewCooldown {
+		cli := c.authClient
+		c.authLock.Unlock()
+		return cli, nil
 	}
 
 	cli, err := c.newClient()
 	if err != nil {
+		c.authLock.Unlock()
 		return nil, err
 	}
 
 	c.authClient = cli
+	c.authRenewAt = time.Now()
+	c.authLock.Unlock()
+
 	logc.Infof(cli.Ctx(), "etcd 鉴权失效，已重建连接：%v", c.endpoints)
 
 	return cli, nil
+}
+
+// Reauth recreates the connection for the given endpoints after an auth error.
+func (r *Registry) Reauth(endpoints []string) (EtcdClient, error) {
+	c, _ := r.getOrCreateCluster(endpoints)
+
+	stale, err := c.getClient()
+	if err != nil {
+		return nil, err
+	}
+
+	return c.reauth(stale)
+}
+
+// IsAuthError reports whether err is an etcd authentication error.
+func IsAuthError(err error) bool {
+	return isAuthError(err)
 }
 
 // startTokenRefresher 在配置了鉴权账号时启动 token 预刷新 goroutine。
@@ -253,18 +292,33 @@ func (c *cluster) runTokenRefresher() {
 	if interval <= 0 {
 		interval = tokenTTL / 2
 	}
+	// 抖动幅度取提前量的一半：多实例同时启动时，固定周期会让所有实例在同一
+	// 时刻刷新，瞬间并发重建连接 + 迁移 watch 会打爆 etcd（惊群）。叠加随机抖动
+	// 把各实例刷新时刻错开；幅度小于提前量，保证仍在 token 到期前完成刷新。
+	jitterRange := tokenRefreshMargin / 2
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(refreshIntervalWithJitter(interval, jitterRange))
+	defer timer.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-timer.C:
 			c.refreshToken()
+			timer.Reset(refreshIntervalWithJitter(interval, jitterRange))
 		case <-c.refreshStop:
 			return
 		}
 	}
+}
+
+// refreshIntervalWithJitter 在基准间隔上叠加 [-jitterRange, +jitterRange] 的随机抖动，
+// 用于把多个实例的 token 预刷新时刻错开，避免惊群。
+func refreshIntervalWithJitter(interval, jitterRange time.Duration) time.Duration {
+	if jitterRange <= 0 {
+		return interval
+	}
+	delta := time.Duration(rand.Int63n(int64(2*jitterRange)+1)) - jitterRange
+	return interval + delta
 }
 
 // refreshToken 主动新建一条带新 token 的连接，并把所有 watch 迁移过去，
@@ -279,6 +333,7 @@ func (c *cluster) refreshToken() {
 	c.authLock.Lock()
 	oldCli := c.authClient
 	c.authClient = cli
+	c.authRenewAt = time.Now()
 	c.authLock.Unlock()
 
 	// 把所有 watch 迁移到新连接
@@ -403,8 +458,10 @@ func (c *cluster) load(cli EtcdClient, key watchKey) int64 {
 		// 一元调用不会刷新 token：若携带的 token 已失效（simple token 到期、etcd 重启
 		// 导致 token 作废、密码被改），继续用同一连接重试永远不会成功。
 		// 这里换一条新连接，clientv3 会在建流/首次认证时重新登录。
+		// 只有确实拿到新连接才立即重试；若命中重建冷却（凭据错误等）则走下面的退避，
+		// 避免无间隔重试在 etcd 侧形成无效鉴权风暴。
 		if isAuthError(err) {
-			if fresh, cerr := c.reauth(); cerr == nil {
+			if fresh, cerr := c.reauth(cli); cerr == nil && fresh != cli {
 				cli = fresh
 				continue
 			}
@@ -491,6 +548,17 @@ func (c *cluster) watch(cli EtcdClient, key watchKey, rev int64) {
 		if rev != 0 && errors.Is(err, rpctypes.ErrCompacted) {
 			logc.Errorf(cli.Ctx(), "etcd watch stream has been compacted, try to reload, rev %d", rev)
 			rev = c.load(cli, key)
+		}
+
+		// 鉴权类错误在原连接上重试没有意义：token 已失效且不会自动重新登录，
+		// 持续重试会让 etcd 反复校验过期 token（日志刷屏 + CPU 飙升）。
+		// 换一条新连接并重新对齐一次数据后立即恢复 watch。
+		if isAuthError(err) {
+			if fresh, cerr := c.reauth(cli); cerr == nil && fresh != cli {
+				cli = fresh
+				rev = c.load(cli, key)
+				continue
+			}
 		}
 
 		// log the error and retry
@@ -631,10 +699,13 @@ func isAuthError(err error) bool {
 	if status.Code(err) == codes.Unauthenticated {
 		return true
 	}
-	if errors.Is(err, rpctypes.ErrUserEmpty) || errors.Is(err, rpctypes.ErrAuthOldRevision) {
+	if errors.Is(err, rpctypes.ErrUserEmpty) ||
+		errors.Is(err, rpctypes.ErrAuthOldRevision) ||
+		errors.Is(err, rpctypes.ErrInvalidAuthToken) {
 		return true
 	}
 
+	// 字符串兜底：错误被上层二次包装成非 rpctypes 类型时 errors.Is 会失效。
 	msg := err.Error()
 	return strings.Contains(msg, "invalid auth token") ||
 		strings.Contains(msg, "user name is empty")

@@ -15,9 +15,10 @@
 | `v1.9.5` | `4d34a84` | 2026-11-12 | 仅文档：新增上游核对记录（代码与 `v1.9.4` 相同） |
 | `v1.9.6` | — | 2026-11-15 | etcd simple token 到期前预刷新连接，避免 watch 断连风暴 |
 | `v1.9.7` | — | 2026-11-15 | watch 加 WithProgressNotify + revision 断点续传，降低鉴权重连恢复开销 |
+| `v1.9.8` | — | 2026-11-19 | 鉴权失效后重建连接并加冷却，预刷新叠加抖动，消除过期 token 空转 |
 
-业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.6`（含 P1-P5）。
-`v1.9.7` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
+业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.8`（含 P1-P7）。
+`v1.9.8` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
 本文档可能晚于表中最后一个 tag：后续纯文档修订只在 `main` 上提交，不再单独打 tag。
 
 ## 二、补丁明细
@@ -200,9 +201,41 @@ P6 负责降低任意鉴权模式下 watch 断连后的恢复开销，并不是 
 **兼容性**：普通事件推进 revision 不依赖 progress notify；即使服务端未发送进度通知，
 断点续传仍然有效。进度通知周期由服务端版本与配置决定，客户端不硬编码该周期。
 
+### P7 `v1.9.8` — 鉴权失效后重建连接并加冷却，预刷新叠加抖动
+
+**位置**：`core/discov/internal/registry.go`（`load()`、`reauth()`、`watch()`）、
+`core/discov/publisher.go`（`doRegister()`）、`core/discov/internal/vars.go`（既有 `tokenTTL`/`tokenRefreshMargin`）
+
+**现象**：etcd 服务端日志在同一毫秒内成片出现
+`auth/jwt.go failed to parse a JWT token: Token is expired` 与
+`auth/store.go invalid auth token`，etcd 进程 CPU 冲高；同时客户端 resolver 拿不到地址，
+上层出现 `produced zero addresses`。
+
+**根因**：
+1. `load()` 在鉴权失败且 `reauth()` 返回缓存连接时无条件 `continue`，无任何退避，
+   形成无间隔空转。
+2. `reauth()` 只要 `authClient` 非空就永久复用，一旦这条连接同样不可用便无法恢复。
+3. `watch()` 与 publisher 续租都在原连接上无限重试已过期的 token。
+4. 预刷新周期固定，多实例同时启动会在同一时刻集中重建连接（惊群）。
+
+**改动**：
+1. `load()`：仅在确实换到新连接（`fresh != cli`）时立即重试，否则走 `coolDownInterval` 退避。
+2. `reauth(stale)`：增加并发复用判断（其他协程已重建则直接复用）与
+   `authRenewCooldown = 10s` 重建冷却，凭据确实错误时不至于每秒重建连接。
+3. `watch()`：识别鉴权错误后换新连接、重新 `load()` 对齐 revision，再恢复 watch。
+4. `publisher.doRegister()`：鉴权错误时经 `Registry.Reauth()` 重建连接并重试一次。
+5. 预刷新周期叠加 `±tokenRefreshMargin/2` 随机抖动（`refreshIntervalWithJitter`），
+   错开多实例刷新时刻，幅度小于提前量，保证仍在到期前完成刷新（P5 增强）。
+6. `isAuthError()` 补 `rpctypes.ErrInvalidAuthToken` 判断。
+
+**兼容性**：期望凭据错误时表现为每秒至多一次退避重试，而非空转；凭据恢复后由
+`reauth` 冷却到期自动重建，无需重启进程。
+
+**验证**：`go build ./core/discov/...`、`go vet ./core/discov/...` 通过。
+
 ## 三、同步上游时的 rebase 指南
 
-1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.7`，冲突集中在
+1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.8`，冲突集中在
    `core/discov/internal/registry.go`，必要时手工重放。
 2. 每条补丁重放后核对以下上游实现是否已自带同类修复：
    - `watch()` 是否已有退避
