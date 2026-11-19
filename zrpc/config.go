@@ -101,6 +101,8 @@ func (cc RpcClientConf) BuildTarget() (string, error) {
 
 	if cc.Etcd.HasAccount() {
 		discov.RegisterAccount(cc.Etcd.Hosts, cc.Etcd.User, cc.Etcd.Pass)
+		// 未配置时为零值，RegisterTokenPolicy 内部回退默认值（24h / 30m）。
+		discov.RegisterTokenPolicy(cc.Etcd.Hosts, cc.Etcd.TokenTTL, cc.Etcd.TokenRefreshMargin)
 	}
 	if cc.Etcd.HasTLS() {
 		if err := discov.RegisterTLS(cc.Etcd.Hosts, cc.Etcd.CertFile, cc.Etcd.CertKeyFile,

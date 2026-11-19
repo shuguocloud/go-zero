@@ -347,15 +347,17 @@ func (c *cluster) startTokenRefresher() {
 }
 
 func (c *cluster) runTokenRefresher() {
+	policy := GetTokenPolicy(c.endpoints)
+
 	// 刷新间隔 = TTL - 提前量，确保在 token 到期前完成重建。
-	interval := tokenTTL - tokenRefreshMargin
+	interval := policy.TTL - policy.Margin
 	if interval <= 0 {
-		interval = tokenTTL / 2
+		interval = policy.TTL / 2
 	}
 	// 抖动幅度取提前量的一半：多实例同时启动时，固定周期会让所有实例在同一
 	// 时刻刷新，瞬间并发重建连接 + 迁移 watch 会打爆 etcd（惊群）。叠加随机抖动
 	// 把各实例刷新时刻错开；幅度小于提前量，保证仍在 token 到期前完成刷新。
-	jitterRange := tokenRefreshMargin / 2
+	jitterRange := policy.Margin / 2
 
 	timer := time.NewTimer(refreshIntervalWithJitter(interval, jitterRange))
 	defer timer.Stop()

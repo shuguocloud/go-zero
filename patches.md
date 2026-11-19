@@ -18,9 +18,10 @@
 | `v1.9.8` | — | 2026-11-19 | 鉴权失效后重建连接并加冷却，预刷新叠加抖动，消除过期 token 空转 |
 | `v1.9.9` | — | 2026-11-19 | 失败重试指数退避、替换连接后关闭旧连、重载去抖，遏制过期 token 下的请求风暴 |
 | `v1.9.10` | — | 2026-11-19 | 去掉重复认证探测、预刷新提前量 30min、watch 重建错峰，降低 etcd 鉴权压力 |
+| `v1.9.11` | — | 2026-11-19 | 新增 P10：token TTL 与预刷新提前量可配置（EtcdConf 字段，默认 24h/30m） |
 
-业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.10`（含 P1-P9）。
-`v1.9.10` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
+业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.11`（含 P1-P10）。
+`v1.9.11` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
 本文档可能晚于表中最后一个 tag：后续纯文档修订只在 `main` 上提交，不再单独打 tag。
 
 ## 二、补丁明细
@@ -293,9 +294,51 @@ P6 负责降低任意鉴权模式下 watch 断连后的恢复开销，并不是 
 
 **验证**：`go build ./core/discov/...`、`go vet ./core/discov/...` 通过。
 
+### P10 `v1.9.11` — token TTL 与预刷新提前量可配置
+
+**位置**：`core/discov/config.go`（`EtcdConf`）、`core/discov/accountregistry.go`、
+`core/discov/internal/accountmanager.go`、`core/discov/internal/registry.go`、
+`zrpc/config.go`
+
+**背景**：`tokenTTL`（24h）与 `tokenRefreshMargin`（30m）原为 internal 包级常量。
+服务端 `auth-token ttl` 调整后（如止血调 168h），客户端不改代码就无法对齐，
+预刷新节奏会偏离实际到期时间。
+
+**改动**：
+
+1. `EtcdConf` 新增两个字段，默认值与常量一致，不配置即保持原有行为：
+   ```go
+   TokenTTL           time.Duration `json:",optional,default=24h"`
+   TokenRefreshMargin time.Duration `json:",optional,default=30m"`
+   ```
+2. internal 新增按集群登记的 `TokenPolicy`（`AddTokenPolicy` / `GetTokenPolicy`），
+   沿用 `AddAccount` 的 cluster key map 模式，多 etcd 集群可各自配置。
+3. `RegisterTokenPolicy` 由 `zrpc` 在注册账号时一并调用；零值回退默认，
+   `margin >= ttl` 时退化 `ttl/2`，避免负间隔。
+4. `runTokenRefresher` 改为读取 per-cluster 策略。
+
+**配置示例**（在业务 yaml 的 Etcd 段内，两项均可省略）：
+
+```yaml
+Etcd:
+  Hosts:
+    - 127.0.0.1:2379
+  Key: user.rpc
+  User: root
+  Pass: <原值不变>
+  TokenTTL: 24h               # 与服务端 ttl 严格一致
+  TokenRefreshMargin: 30m     # 到期前多久预刷新
+```
+
+**注意**：etcd 不对外暴露 ttl，配置化只免去重编译，两端仍需人工对齐。
+
+**验证**：`go build`/`go vet ./core/discov/... ./zrpc/...` 通过。
+`go test ./core/discov/internal/` 存在 P8 遗留的 `watchConnState` goroutine 泄漏
+导致 `TestClusterWatch_RespFailures` 跨用例污染失败（v1.9.9 起即存在），与 P10 无关。
+
 ## 三、同步上游时的 rebase 指南
 
-1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.10`，冲突集中在
+1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.11`，冲突集中在
    `core/discov/internal/registry.go`，必要时手工重放。
 2. 每条补丁重放后核对以下上游实现是否已自带同类修复：
    - `watch()` 是否已有退避

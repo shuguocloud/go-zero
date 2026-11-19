@@ -1,6 +1,9 @@
 package discov
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 var (
 	// errEmptyEtcdHosts indicates that etcd hosts are empty.
@@ -11,15 +14,21 @@ var (
 
 // EtcdConf is the config item with the given key on etcd.
 type EtcdConf struct {
-	Hosts              []string
-	Key                string
-	ID                 int64  `json:",optional"`
-	User               string `json:",optional"`
-	Pass               string `json:",optional"`
-	CertFile           string `json:",optional"`
-	CertKeyFile        string `json:",optional=CertFile"`
-	CACertFile         string `json:",optional=CertFile"`
-	InsecureSkipVerify bool   `json:",optional"`
+	Hosts       []string
+	Key         string
+	ID          int64  `json:",optional"`
+	User        string `json:",optional"`
+	Pass        string `json:",optional"`
+	CertFile    string `json:",optional"`
+	CertKeyFile string `json:",optional=CertFile"`
+	CACertFile  string `json:",optional=CertFile"`
+	// TokenTTL 需与 etcd 服务端 auth-token 的 ttl 严格一致（JWT 默认 24h），
+	// 预刷新节奏以它为基准；服务端调整 ttl 时应同步修改。
+	TokenTTL time.Duration `json:",optional,default=24h"`
+	// TokenRefreshMargin 在 token 到期前多久预刷新。留足余量以覆盖新建连接与
+	// 迁移全部 watch 的耗时（ARM64 上单次鉴权可达数百毫秒）。
+	TokenRefreshMargin time.Duration `json:",optional,default=30m"`
+	InsecureSkipVerify bool          `json:",optional"`
 }
 
 // HasAccount returns if account provided.
