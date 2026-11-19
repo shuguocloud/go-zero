@@ -20,9 +20,10 @@
 | `v1.9.10` | — | 2026-11-19 | 去掉重复认证探测、预刷新提前量 30min、watch 重建错峰，降低 etcd 鉴权压力 |
 | `v1.9.11` | — | 2026-11-19 | 新增 P10：token TTL 与预刷新提前量可配置（EtcdConf 字段，默认 24h/30m） |
 | `v1.9.12` | — | 2026-11-19 | 新增 P11：修复 watchConnState goroutine 泄漏（连接替换后永久阻塞） |
+| `v1.9.13` | — | 2026-11-19 | 新增 P12：预刷新失败快速重试、失败告警日志、Registry.Close 与退出钩子 |
 
-业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.12`（含 P1-P11）。
-`v1.9.12` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
+业务项目侧的依赖版本需与本文件的 tag 对应，当前为 `v1.9.13`（含 P1-P12）。
+`v1.9.13` 为本次新增补丁，业务侧 `go.mod` 需更新到对应 tag 并刷新 vendor。
 本文档可能晚于表中最后一个 tag：后续纯文档修订只在 `main` 上提交，不再单独打 tag。
 
 ## 二、补丁明细
@@ -366,9 +367,34 @@ goroutine 与连接对象一起泄漏（每次重建连接泄漏 1 个）。
 `TestClusterWatch_RespFailures` 跨用例失败）。
 `go test -race` 在 Windows 本机因 race runtime 不可用而无法执行，需在 Linux 环境补验。
 
+### P12 `v1.9.13` — 预刷新失败快速重试、告警日志与优雅停止
+
+**位置**：`core/discov/internal/registry.go`
+
+**背景**：P10 的预刷新在 `refreshToken` 失败后只打一行日志就返回，下一次尝试
+要等约一个完整周期（`TTL - margin` ≈ 23.5h），而 token 24h 即过期——一次瞬时
+失败（etcd 抖动、凭据轮换、网络中断）就会退化为到期瞬间的断连风暴，与方案 A
+的初衷相悖。同时 `refreshStop` 从未被 close，`Registry` 也没有 `Close()`，
+刷新协程只能随进程退出而消失，缺少优雅停止路径。
+
+**改动**：
+
+1. `refreshToken()` 返回 error（新建客户端失败时上抛；关闭旧连接失败仅记日志）。
+2. `runTokenRefresher` 失败后按 1min→2min→4min…（封顶 5min）快速重试，
+   成功即恢复 `TTL - margin` 周期并复位连续失败计数。
+3. 失败日志输出"连续失败次数 + 距 token 过期剩余时间"，便于配置告警规则，
+   避免连续失败后静默过期。
+4. 新增 `cluster.stopTokenRefresher()`（`sync.Once` 保护）与 `cluster.close()`；
+   新增 `Registry.Close()`，停止全部集群的预刷新协程并取消 watch。
+5. `newCluster` 通过 `proc.AddShutdownListener` 注册一次退出钩子，进程优雅退出时
+   自动调用 `Registry.Close()`（Windows 下 polyfill 不注册，无副作用）。
+
+**验证**：`go build ./core/discov/...`、`go vet ./core/discov/...`、
+`go test ./core/discov/... -count=1` 全部通过。
+
 ## 三、同步上游时的 rebase 指南
 
-1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.12`，冲突集中在
+1. 以上游新版本为基线，逐条 cherry-pick `v1.9.1` 至 `v1.9.13`，冲突集中在
    `core/discov/internal/registry.go`，必要时手工重放。
 2. 每条补丁重放后核对以下上游实现是否已自带同类修复：
    - `watch()` 是否已有退避

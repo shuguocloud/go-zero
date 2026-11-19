@@ -15,6 +15,7 @@ import (
 	"github.com/shuguocloud/go-zero/core/lang"
 	"github.com/shuguocloud/go-zero/core/logc"
 	"github.com/shuguocloud/go-zero/core/mathx"
+	"github.com/shuguocloud/go-zero/core/proc"
 	"github.com/shuguocloud/go-zero/core/syncx"
 	"github.com/shuguocloud/go-zero/core/threading"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
@@ -37,6 +38,11 @@ const (
 	authRetryMaxBackoff = 30 * time.Second
 	// reloadCooldown 限制连接状态抖动触发的全量重载频率，避免反复重建全部 watch。
 	reloadCooldown = time.Second
+	// tokenRefreshRetryMin/tokenRefreshRetryMax 预刷新失败后的重试退避区间。
+	// 一次刷新失败若等到下一个完整周期（约 TTL）才重试，token 早已过期，
+	// 会退化成到期瞬间的断连风暴；因此按 1min→2min→4min… 快速重试，封顶 5min。
+	tokenRefreshRetryMin = time.Minute
+	tokenRefreshRetryMax = 5 * time.Minute
 	// watchMigrateStagger 全量重载时相邻 watch 的启动间隔。clientv3 每建一条
 	// watch 流都会先 Authenticate 一次，多个 key 同时重建会在 etcd 侧形成
 	// 鉴权尖峰（key 数越多越明显），这里把启动时刻依次错开摊平。
@@ -61,6 +67,18 @@ type Registry struct {
 // GetRegistry returns a global Registry.
 func GetRegistry() *Registry {
 	return &registry
+}
+
+// Close 停止所有集群的 token 预刷新协程并取消 watch，用于服务优雅退出。
+func (r *Registry) Close() {
+	r.lock.Lock()
+	clusters := r.clusters
+	r.clusters = make(map[string]*cluster)
+	r.lock.Unlock()
+
+	for _, c := range clusters {
+		c.close()
+	}
 }
 
 // GetConn returns an etcd client connection associated with given endpoints.
@@ -193,6 +211,8 @@ type (
 		reloadAt time.Time
 		// refreshStop 用于停止 token 预刷新 goroutine。
 		refreshStop chan struct{}
+		// stopOnce 保证 stopTokenRefresher 可被重复调用。
+		stopOnce sync.Once
 	}
 )
 
@@ -206,7 +226,20 @@ func newCluster(endpoints []string) *cluster {
 		refreshStop: make(chan struct{}),
 	}
 	c.startTokenRefresher()
+	registerShutdownHook()
 	return c
+}
+
+var shutdownHookOnce sync.Once
+
+// registerShutdownHook 在进程优雅退出时停止所有 token 预刷新协程，
+// 避免关闭过程中仍有协程在后台重建连接、迁移 watch。
+func registerShutdownHook() {
+	shutdownHookOnce.Do(func() {
+		proc.AddShutdownListener(func() {
+			GetRegistry().Close()
+		})
+	})
 }
 
 func (c *cluster) addListener(key watchKey, l UpdateListener) {
@@ -360,18 +393,48 @@ func (c *cluster) runTokenRefresher() {
 	// 把各实例刷新时刻错开；幅度小于提前量，保证仍在 token 到期前完成刷新。
 	jitterRange := policy.Margin / 2
 
+	// lastRenew 记录最近一次认证成功的时间，失败时据此估算 token 剩余有效期。
+	lastRenew := time.Now()
 	timer := time.NewTimer(refreshIntervalWithJitter(interval, jitterRange))
 	defer timer.Stop()
 
+	var failed int
 	for {
 		select {
 		case <-timer.C:
-			c.refreshToken()
+			if err := c.refreshToken(); err != nil {
+				failed++
+				next := refreshRetryBackoff(failed)
+				// 失败必须快速重试：若等一个完整周期（约 TTL）才重试，token 早已过期。
+				// 日志同时给出连续失败次数与剩余有效期，便于配置告警规则。
+				logc.Errorf(context.Background(),
+					"etcd token 预刷新失败（连续 %d 次）%v: %v，%s 后重试，token 预计 %s 后过期",
+					failed, c.endpoints, err, next,
+					(policy.TTL - time.Since(lastRenew)).Round(time.Second))
+				timer.Reset(next)
+				continue
+			}
+
+			failed = 0
+			lastRenew = time.Now()
 			timer.Reset(refreshIntervalWithJitter(interval, jitterRange))
 		case <-c.refreshStop:
 			return
 		}
 	}
+}
+
+// refreshRetryBackoff 计算预刷新失败后的重试间隔：1min、2min、4min…封顶 5min。
+func refreshRetryBackoff(failed int) time.Duration {
+	if failed <= 1 {
+		return tokenRefreshRetryMin
+	}
+	backoff := tokenRefreshRetryMin << (failed - 1)
+	if backoff <= 0 || backoff > tokenRefreshRetryMax {
+		return tokenRefreshRetryMax
+	}
+
+	return backoff
 }
 
 // refreshIntervalWithJitter 在基准间隔上叠加 [-jitterRange, +jitterRange] 的随机抖动，
@@ -386,11 +449,10 @@ func refreshIntervalWithJitter(interval, jitterRange time.Duration) time.Duratio
 
 // refreshToken 主动新建一条带新 token 的连接，并把所有 watch 迁移过去，
 // 最后关闭旧连接。这样旧 token 到期时不会引发 watch 断连风暴。
-func (c *cluster) refreshToken() {
+func (c *cluster) refreshToken() error {
 	cli, err := c.newClient()
 	if err != nil {
-		logc.Errorf(context.Background(), "etcd token 预刷新：新建客户端失败 %v: %v", c.endpoints, err)
-		return
+		return fmt.Errorf("新建客户端失败: %w", err)
 	}
 
 	c.authLock.Lock()
@@ -410,6 +472,42 @@ func (c *cluster) refreshToken() {
 	}
 
 	logc.Infof(context.Background(), "etcd token 预刷新完成，已迁移 watch：%v", c.endpoints)
+	return nil
+}
+
+// stopTokenRefresher 停止 token 预刷新协程，可重复调用。
+func (c *cluster) stopTokenRefresher() {
+	c.stopOnce.Do(func() {
+		close(c.refreshStop)
+	})
+}
+
+// close 停止预刷新协程、取消全部 watch 并释放鉴权连接，用于进程优雅退出。
+func (c *cluster) close() {
+	c.stopTokenRefresher()
+
+	c.lock.Lock()
+	close(c.done)
+	for wk, wval := range c.watchers {
+		if wval.cancel != nil {
+			wval.cancel()
+		}
+		delete(c.watchers, wk)
+	}
+	cli := c.authClient
+	group := c.watchGroup
+	c.lock.Unlock()
+
+	if group == nil {
+		return
+	}
+	// watchStream 阻塞在 Recv 上，需先关闭连接才能让 goroutine 退出。
+	if cli != nil {
+		if err := cli.Close(); err != nil {
+			logc.Errorf(context.Background(), "etcd 关闭连接失败 %v: %v", c.endpoints, err)
+		}
+	}
+	group.Wait()
 }
 
 func (c *cluster) getCurrent(key watchKey) []KV {
